@@ -12,6 +12,7 @@ import (
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/config"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/seckill"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/shop"
+	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/social"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/user"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/voucher"
 )
@@ -40,16 +41,23 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 	service.Register(router, requireLogin)
 	shop.New(deps.mysql, deps.redis, logger, cfg.ShopAdminUserID).Register(router, requireLogin)
 	voucher.New(deps.mysql, logger, cfg.VoucherAdminUserID, service).Register(router, requireLogin)
+	community := social.New(deps.mysql, deps.redis, logger)
+	community.Register(router, requireLogin, users.OptionalLogin())
 	workerCtx, stopWorkers := context.WithCancel(context.WithoutCancel(ctx))
-	workersDone := make(chan error, 1)
+	workersDone := make(chan error, 2)
+	go func() {
+		workersDone <- community.RunWorkers(workerCtx, cfg.KafkaBrokers, deps.kafka, deps.kafkaTransport)
+	}()
 	go func() {
 		workersDone <- service.RunWorkers(workerCtx, cfg.KafkaBrokers, deps.kafka, deps.kafkaTransport,
 			cfg.KafkaRelayWorkers, cfg.KafkaConsumerWorkers)
 	}()
 	defer func() {
 		stopWorkers()
-		if err := <-workersDone; err != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("close seckill workers: %w", err))
+		for range 2 {
+			if err := <-workersDone; err != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("close background workers: %w", err))
+			}
 		}
 	}()
 	server := &http.Server{

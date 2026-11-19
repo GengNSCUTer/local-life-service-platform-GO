@@ -90,6 +90,12 @@ func (s *Service) listByType(c *gin.Context) {
 		httpx.Respond(c, http.StatusBadRequest, "invalid shop type ID", nil)
 		return
 	}
+	x, hasX := c.GetQuery("x")
+	y, hasY := c.GetQuery("y")
+	if hasX || hasY {
+		s.nearby(c, typeID, x, y)
+		return
+	}
 	s.list(c, typeID, "", 5)
 }
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -84,14 +85,17 @@ func (r repository) create(ctx context.Context, item *shopRecord) error {
 		if err := requireType(tx, item.TypeID); err != nil {
 			return err
 		}
-		return tx.Table(shopTable).Create(item).Error
+		if err := tx.Table(shopTable).Create(item).Error; err != nil {
+			return err
+		}
+		return bumpGeo(tx, item.TypeID)
 	})
 }
 
 func (r repository) update(ctx context.Context, id uint64, changes shopPatch) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var existing shopRecord
-		if err := tx.Table(shopTable).Select("id").Take(&existing, "id = ?", id).Error; err != nil {
+		if err := tx.Table(shopTable).Clauses(clause.Locking{Strength: "UPDATE"}).Select("id, type_id").Take(&existing, "id = ?", id).Error; err != nil {
 			return err
 		}
 		if changes.TypeID != nil {
@@ -99,6 +103,18 @@ func (r repository) update(ctx context.Context, id uint64, changes shopPatch) er
 				return err
 			}
 		}
-		return tx.Table(shopTable).Where("id = ?", id).Updates(changes).Error
+		if err := tx.Table(shopTable).Where("id = ?", id).Updates(changes).Error; err != nil {
+			return err
+		}
+		if changes.TypeID != nil && *changes.TypeID != existing.TypeID {
+			if err := bumpGeo(tx, min(*changes.TypeID, existing.TypeID)); err != nil {
+				return err
+			}
+			return bumpGeo(tx, max(*changes.TypeID, existing.TypeID))
+		}
+		if changes.X != nil || changes.Y != nil {
+			return bumpGeo(tx, existing.TypeID)
+		}
+		return nil
 	})
 }

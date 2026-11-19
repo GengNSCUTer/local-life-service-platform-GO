@@ -46,6 +46,8 @@ func (s *Service) Register(router *gin.Engine) {
 	protected.GET("/me", s.me)
 	protected.GET("/:id", s.getProfile)
 	protected.POST("/logout", s.logout)
+	protected.POST("/sign", s.sign)
+	protected.GET("/sign/count", s.signCount)
 }
 
 func (s *Service) requestCode(c *gin.Context) {
@@ -93,7 +95,19 @@ func (s *Service) createSession(c *gin.Context) {
 }
 
 func (s *Service) RequireLogin() gin.HandlerFunc {
+	return s.authenticate(true)
+}
+
+func (s *Service) OptionalLogin() gin.HandlerFunc {
+	return s.authenticate(false)
+}
+
+func (s *Service) authenticate(required bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if !required && c.GetHeader("Authorization") == "" {
+			c.Next()
+			return
+		}
 		token := authorizationToken(c.GetHeader("Authorization"))
 		if token == "" || len(token) > 256 {
 			rejectSession(c)

@@ -21,12 +21,13 @@
 
 ## 本地体验
 
-新库按编号应用迁移 `001` 至 `007`。已经完成阶段 3 时执行新增迁移。应用的秒杀 Worker 会在后台创建所需 Kafka 主题，新业务活动可直接通过 HTTP 创建。原来的 `prepare-seckill` 命令用于隔离环境的压测和故障演练。
+新库按编号应用迁移 `001` 至 `008`。已经完成阶段 3 时执行新增迁移。应用的秒杀 Worker 会在后台创建所需 Kafka 主题，新业务活动可直接通过 HTTP 创建。原来的 `prepare-seckill` 命令用于隔离环境的压测和故障演练。
 
 ```bash
 docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/005_voucher.sql
 docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/006_order_lifecycle.sql
 docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/007_reservation_anomalies.sql
+docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/008_social.sql
 SHOP_ADMIN_USER_ID=7 VOUCHER_ADMIN_USER_ID=7 AUTH_DEV_LOG_CODES=true go run ./cmd/api
 ```
 
