@@ -10,6 +10,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
+	"gorm.io/gorm"
 )
 
 const (
@@ -33,22 +34,44 @@ func CreateTopics(ctx context.Context, client *kafka.Client) error {
 	return nil
 }
 
-// RunWorkers returns after both loops and their Kafka clients have stopped.
-func (s *Service) RunWorkers(ctx context.Context, brokers []string, transport *kafka.Transport) error {
+// RunWorkers returns after all loops and their Kafka clients have stopped.
+func (s *Service) RunWorkers(ctx context.Context, brokers []string, transport *kafka.Transport,
+	relayWorkers, consumerWorkers int) error {
+	if relayWorkers < 1 {
+		relayWorkers = 1
+	}
+	if consumerWorkers < 1 {
+		consumerWorkers = 1
+	}
 	writer := &kafka.Writer{
 		Addr: kafka.TCP(brokers...), Transport: transport, Balancer: &kafka.Hash{},
-		RequiredAcks: kafka.RequireAll, BatchSize: 1, MaxAttempts: 1,
+		RequiredAcks: kafka.RequireAll, BatchSize: 64, BatchTimeout: 10 * time.Millisecond, MaxAttempts: 3,
 		ReadTimeout: 3 * time.Second, WriteTimeout: 3 * time.Second,
 	}
-	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: brokers, Topic: orderTopic, GroupID: "hmdp-seckill-orders-v1",
+	readers := make([]*kafka.Reader, 0, consumerWorkers)
+	var workers sync.WaitGroup
+	for i := 0; i < relayWorkers; i++ {
+		workers.Go(func() { s.relay(ctx, writer) })
+	}
+	for i := 0; i < consumerWorkers; i++ {
+		reader := kafka.NewReader(kafka.ReaderConfig{
+			Brokers: brokers, Topic: orderTopic, GroupID: "hmdp-seckill-orders-v1",
+			StartOffset: kafka.FirstOffset, MaxWait: 500 * time.Millisecond,
+		})
+		readers = append(readers, reader)
+		workers.Go(func() { s.consume(ctx, reader, writer) })
+	}
+	dlqReader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers: brokers, Topic: deadLetterTopic, GroupID: "hmdp-seckill-dlq-v1",
 		StartOffset: kafka.FirstOffset, MaxWait: time.Second,
 	})
-	var workers sync.WaitGroup
-	workers.Go(func() { s.relay(ctx, writer) })
-	workers.Go(func() { s.consume(ctx, reader, writer) })
+	workers.Go(func() { s.reconcile(ctx, dlqReader) })
 	workers.Wait()
-	return errors.Join(reader.Close(), writer.Close())
+	closeErrs := []error{dlqReader.Close(), writer.Close()}
+	for _, reader := range readers {
+		closeErrs = append(closeErrs, reader.Close())
+	}
+	return errors.Join(closeErrs...)
 }
 
 func (s *Service) relay(ctx context.Context, writer *kafka.Writer) {
@@ -116,10 +139,16 @@ func (s *Service) processMessage(ctx context.Context, writer *kafka.Writer, mess
 		orderIDPattern.MatchString(event.ID) && string(message.Key) == event.ID &&
 		event.VoucherID > 0 && event.UserID > 0 && !event.CreatedAt.IsZero() {
 		err := persistOrder(ctx, s.db, event)
-		if !errors.Is(err, errOrderConflict) {
+		switch {
+		case err == nil:
+			return nil
+		case errors.Is(err, errOrderConflict):
+			reason = "order_conflict"
+		case errors.Is(err, errInventoryMismatch):
+			reason = "inventory_mismatch"
+		default:
 			return err
 		}
-		reason = "order_conflict"
 	}
 	// Offset commit waits for Kafka to confirm that the dead-letter record exists.
 	return writer.WriteMessages(ctx, kafka.Message{
@@ -128,6 +157,89 @@ func (s *Service) processMessage(ctx context.Context, writer *kafka.Writer, mess
 		Value:   message.Value,
 		Headers: []kafka.Header{{Key: "reason", Value: []byte(reason)}},
 	})
+}
+
+func (s *Service) reconcile(ctx context.Context, reader *kafka.Reader) {
+	for ctx.Err() == nil {
+		message, err := reader.FetchMessage(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			s.logger.Warn("seckill DLQ fetch will retry", "error", err)
+			wait(ctx, time.Second)
+			continue
+		}
+		if !s.retry(ctx, "reconcile dead letter", func(operation context.Context) error {
+			return s.reconcileDeadLetter(operation, message)
+		}) {
+			return
+		}
+		if !s.retry(ctx, "commit DLQ offset", func(operation context.Context) error {
+			return reader.CommitMessages(operation, message)
+		}) {
+			return
+		}
+	}
+}
+
+func (s *Service) reconcileDeadLetter(ctx context.Context, message kafka.Message) error {
+	var event orderEvent
+	reason := "invalid_order_event"
+	for _, header := range message.Headers {
+		if header.Key == "reason" {
+			reason = string(header.Value)
+			break
+		}
+	}
+	if err := json.Unmarshal(message.Value, &event); err != nil || event.Version != 1 ||
+		!orderIDPattern.MatchString(event.ID) || event.VoucherID == 0 || event.UserID == 0 {
+		return s.recordDeadLetter(ctx, message, event, reason, "manual_review")
+	}
+	if reason != "order_conflict" {
+		return s.recordDeadLetter(ctx, message, event, reason, "manual_review")
+	}
+
+	var existing Order
+	err := s.db.WithContext(ctx).Table("seckill_orders").Take(&existing,
+		"voucher_id = ? AND user_id = ?", event.VoucherID, event.UserID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return s.recordDeadLetter(ctx, message, event, reason, "manual_review")
+	}
+	if err != nil {
+		return err
+	}
+	if existing.ID == event.ID {
+		return s.recordDeadLetter(ctx, message, event, reason, "already_persisted")
+	}
+	if err := s.compensate(ctx, event); err != nil {
+		return fmt.Errorf("restore reservation for order %s: %w", event.ID, err)
+	}
+	return s.recordDeadLetter(ctx, message, event, reason, "compensated")
+}
+
+func (s *Service) recordDeadLetter(ctx context.Context, message kafka.Message, event orderEvent, reason, outcome string) error {
+	return s.db.WithContext(ctx).Exec(`
+		INSERT INTO seckill_dead_letters
+			(dlq_partition, dlq_offset, source_key, order_id, voucher_id, user_id, reason, outcome, payload)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE outcome = VALUES(outcome), reason = VALUES(reason)
+	`, message.Partition, message.Offset, message.Key, nullable(event.ID), nullableID(event.VoucherID),
+		nullableID(event.UserID), reason, outcome, message.Value).Error
+}
+
+func nullable(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func nullableID(value uint64) any {
+	if value == 0 {
+		return nil
+	}
+	return value
 }
 
 func (s *Service) retry(ctx context.Context, name string, run func(context.Context) error) bool {

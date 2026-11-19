@@ -64,11 +64,35 @@ redis.call('ZADD', KEYS[1], now + tonumber(ARGV[1]), due[1])
 return due[1]
 `)
 
+var compensateReservation = redis.NewScript(`
+local resolutionKey = KEYS[3]
+if redis.call('EXISTS', resolutionKey) == 1 then
+    return 0
+end
+if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2] then
+    return redis.error_reply('reservation does not match dead-letter event')
+end
+redis.call('HINCRBY', KEYS[1], 'stock', 1)
+redis.call('HDEL', KEYS[2], ARGV[1])
+redis.call('DEL', KEYS[4])
+redis.call('ZREM', KEYS[5], ARGV[2])
+redis.call('SET', resolutionKey, 'compensated')
+return 1
+`)
+
 func activityKey(id uint64) string {
 	return keyPrefix + "activity:" + strconv.FormatUint(id, 10)
 }
 
 func orderKey(id string) string { return keyPrefix + "order:" + id }
+
+func (s *Service) compensate(ctx context.Context, event orderEvent) error {
+	key := activityKey(event.VoucherID)
+	_, err := compensateReservation.Run(ctx, s.redis,
+		[]string{key, key + ":buyers", keyPrefix + "resolution:" + event.ID, orderKey(event.ID), outboxKey},
+		strconv.FormatUint(event.UserID, 10), event.ID).Int()
+	return err
+}
 
 func (s *Service) Prepare(ctx context.Context, activity Activity) error {
 	activity.StartsAt = activity.StartsAt.UTC().Truncate(time.Millisecond)

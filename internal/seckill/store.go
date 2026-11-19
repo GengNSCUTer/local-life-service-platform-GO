@@ -13,10 +13,11 @@ import (
 const (
 	statusPending   = "pending"
 	statusConfirmed = "confirmed"
-	statusReview    = "review_required"
+	statusReview    = "review_required" // kept for historical records already stored in MySQL
 )
 
 var errOrderConflict = errors.New("order ID or buyer conflicts with an existing order")
+var errInventoryMismatch = errors.New("MySQL inventory does not match the seckill reservation")
 
 type Activity struct {
 	ID             uint64
@@ -71,7 +72,7 @@ func persistOrder(ctx context.Context, db *gorm.DB, event orderEvent) error {
 			return update.Error
 		}
 		if update.RowsAffected == 0 {
-			order.Status = statusReview
+			return errInventoryMismatch
 		}
 		// A duplicate insert rolls back the stock change above.
 		return tx.Table("seckill_orders").Create(&order).Error

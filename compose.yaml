@@ -21,7 +21,7 @@ services:
 
   redis:
     image: redis:7.2
-    command: ['redis-server', '--appendonly', 'yes', '--appendfsync', 'always', '--requirepass', '${REDIS_PASSWORD:-hmdp_dev_redis}']
+    command: ['redis-server', '--appendonly', 'yes', '--appendfsync', 'always', '--requirepass', '${REDIS_PASSWORD:-hmdp_dev_redis}', '--min-replicas-to-write', '1', '--min-replicas-max-lag', '10']
     environment:
       REDISCLI_AUTH: ${REDIS_PASSWORD:-hmdp_dev_redis}
     ports:
@@ -33,6 +33,50 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
+
+  redis-replica:
+    image: redis:7.2
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:-hmdp_dev_redis}
+    command: ['redis-server', '--appendonly', 'yes', '--appendfsync', 'always', '--requirepass', '${REDIS_PASSWORD:-hmdp_dev_redis}', '--masterauth', '${REDIS_PASSWORD:-hmdp_dev_redis}', '--replicaof', 'redis', '6379']
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - redis-replica-data:/data
+    healthcheck:
+      test: ['CMD-SHELL', 'redis-cli ping | grep -qx PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis-sentinel-1: &redis-sentinel
+    image: redis:7.2
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-hmdp_dev_redis}
+    command: ['sh', '-c', 'printf "port 26379\nbind 0.0.0.0\nsentinel monitor hmdp-master redis 6379 2\nsentinel auth-pass hmdp-master $$REDIS_PASSWORD\nsentinel down-after-milliseconds hmdp-master 3000\nsentinel failover-timeout hmdp-master 15000\nsentinel parallel-syncs hmdp-master 1\n" > /tmp/sentinel.conf && exec redis-server /tmp/sentinel.conf --sentinel']
+    depends_on:
+      redis:
+        condition: service_healthy
+      redis-replica:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:${REDIS_SENTINEL_1_PORT:-26380}:26379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-p', '26379', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis-sentinel-2:
+    <<: *redis-sentinel
+    ports:
+      - '127.0.0.1:${REDIS_SENTINEL_2_PORT:-26381}:26379'
+
+  redis-sentinel-3:
+    <<: *redis-sentinel
+    ports:
+      - '127.0.0.1:${REDIS_SENTINEL_3_PORT:-26382}:26379'
 
   kafka:
     image: apache/kafka:4.1.2
@@ -64,4 +108,5 @@ services:
 volumes:
   mysql-data:
   redis-data:
+  redis-replica-data:
   kafka-data:

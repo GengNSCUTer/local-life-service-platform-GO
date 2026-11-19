@@ -35,7 +35,8 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 	workerCtx, stopWorkers := context.WithCancel(context.WithoutCancel(ctx))
 	workersDone := make(chan error, 1)
 	go func() {
-		workersDone <- service.RunWorkers(workerCtx, cfg.KafkaBrokers, deps.kafkaTransport)
+		workersDone <- service.RunWorkers(workerCtx, cfg.KafkaBrokers, deps.kafkaTransport,
+			cfg.KafkaRelayWorkers, cfg.KafkaConsumerWorkers)
 	}()
 	defer func() {
 		stopWorkers()

@@ -55,13 +55,26 @@ func openClients(cfg config.Config) (*clients, error) {
 	}
 
 	transport := &kafka.Transport{DialTimeout: 2 * time.Second}
-	return &clients{
-		mysql: db,
-		redis: redis.NewClient(&redis.Options{
+	redisOptions := &redis.FailoverOptions{
+		MasterName:            cfg.RedisMasterName,
+		SentinelAddrs:         cfg.RedisSentinels,
+		SentinelPassword:      cfg.RedisPassword,
+		Password:              cfg.RedisPassword,
+		ContextTimeoutEnabled: true,
+	}
+	var redisClient *redis.Client
+	if len(cfg.RedisSentinels) > 0 {
+		redisClient = redis.NewFailoverClient(redisOptions)
+	} else {
+		redisClient = redis.NewClient(&redis.Options{
 			Addr:                  cfg.RedisAddr,
 			Password:              cfg.RedisPassword,
 			ContextTimeoutEnabled: true,
-		}),
+		})
+	}
+	return &clients{
+		mysql:          db,
+		redis:          redisClient,
 		kafka:          &kafka.Client{Addr: kafka.TCP(cfg.KafkaBrokers...), Transport: transport},
 		kafkaTransport: transport,
 	}, nil

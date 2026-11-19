@@ -3,18 +3,23 @@ package config
 import (
 	"net"
 	"os"
+	"strconv"
 	"strings"
 )
 
 type Config struct {
-	HTTPAddr      string
-	MySQLAddr     string
-	MySQLUser     string
-	MySQLPassword string
-	MySQLDatabase string
-	RedisAddr     string
-	RedisPassword string
-	KafkaBrokers  []string
+	HTTPAddr             string
+	MySQLAddr            string
+	MySQLUser            string
+	MySQLPassword        string
+	MySQLDatabase        string
+	RedisAddr            string
+	RedisPassword        string
+	RedisSentinels       []string
+	RedisMasterName      string
+	KafkaBrokers         []string
+	KafkaRelayWorkers    int
+	KafkaConsumerWorkers int
 }
 
 func Load() Config {
@@ -24,16 +29,26 @@ func Load() Config {
 			brokers = append(brokers, broker)
 		}
 	}
+	var sentinels []string
+	for _, sentinel := range strings.Split(env("REDIS_SENTINEL_ADDRS", ""), ",") {
+		if sentinel := strings.TrimSpace(sentinel); sentinel != "" {
+			sentinels = append(sentinels, sentinel)
+		}
+	}
 
 	return Config{
-		HTTPAddr:      env("HTTP_ADDR", "127.0.0.1:8080"),
-		MySQLAddr:     env("MYSQL_ADDR", localAddr("MYSQL_PORT", "23306")),
-		MySQLUser:     env("MYSQL_USER", "hmdp"),
-		MySQLPassword: env("MYSQL_PASSWORD", "hmdp_dev_mysql"),
-		MySQLDatabase: env("MYSQL_DATABASE", "hmdp"),
-		RedisAddr:     env("REDIS_ADDR", localAddr("REDIS_PORT", "26379")),
-		RedisPassword: env("REDIS_PASSWORD", "hmdp_dev_redis"),
-		KafkaBrokers:  brokers,
+		HTTPAddr:             env("HTTP_ADDR", "127.0.0.1:8080"),
+		MySQLAddr:            env("MYSQL_ADDR", localAddr("MYSQL_PORT", "23306")),
+		MySQLUser:            env("MYSQL_USER", "hmdp"),
+		MySQLPassword:        env("MYSQL_PASSWORD", "hmdp_dev_mysql"),
+		MySQLDatabase:        env("MYSQL_DATABASE", "hmdp"),
+		RedisAddr:            env("REDIS_ADDR", localAddr("REDIS_PORT", "26379")),
+		RedisPassword:        env("REDIS_PASSWORD", "hmdp_dev_redis"),
+		RedisSentinels:       sentinels,
+		RedisMasterName:      env("REDIS_MASTER_NAME", "hmdp-master"),
+		KafkaBrokers:         brokers,
+		KafkaRelayWorkers:    positiveIntEnv("KAFKA_RELAY_WORKERS", 4),
+		KafkaConsumerWorkers: positiveIntEnv("KAFKA_CONSUMER_WORKERS", 3),
 	}
 }
 
@@ -46,4 +61,12 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func positiveIntEnv(key string, fallback int) int {
+	value, err := strconv.Atoi(env(key, strconv.Itoa(fallback)))
+	if err != nil || value < 1 {
+		return fallback
+	}
+	return value
 }
