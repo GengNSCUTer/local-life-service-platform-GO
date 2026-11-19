@@ -19,6 +19,8 @@ Compose 启动本地 MySQL、Redis、单节点 Kafka。默认只绑定本机，�
 
 按[秒杀联调步骤](docs/03-seckill-design.md#本地体验)执行 SQL 迁移、准备活动并体验抢券与订单查询。
 
+百万和千万请求的复现命令与测量口径见[秒杀接口压测](docs/04-seckill-benchmark.md)。
+
 ## 验证 API
 
 ```bash
