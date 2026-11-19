@@ -29,11 +29,11 @@ flowchart LR
 1. **Redis Lua 受理。** Lua 以 Redis 自己的时钟检查活动时间，在同一次执行中扣减可抢库存、记录买家和订单 ID、写入事件及待投递索引。事件保存在 Redis String，待投递索引用有序集合记录下次可领取时间。收到 `202` 后可查询进度。
 2. **后台投递。** 投递 goroutine 领取待发送记录后设置 15 秒租约。Kafka 确认后移出待投递索引。投递失败或进程在确认前退出时，其他循环可在租约到期后重新发送，订单 ID 保持一致。
 3. **消费落库。** 消费者按顺序处理消息，在 GORM 事务里条件扣库存并插入订单。遇到重复订单时，MySQL 唯一索引让整个事务回滚，消费者核对同一个订单 ID 后提交 offset。消息无效、订单冲突或 MySQL 库存不足时，先写入死信主题，再提交原 offset。MySQL 暂时不可用时保留原消息并退避重试。
-4. **死信对账。** 对账 goroutine 按自己的 Kafka 消费组读取死信。它会把每条死信写入 `seckill_dead_letters`。买家冲突会创建 cancelled 订单并补偿 Redis，库存不足会按 MySQL 事实修正 Redis，非法事件进入人工复核。
+4. **死信对账。** 对账 goroutine 按自己的 Kafka 消费组读取死信。它会把每条死信写入 `seckill_dead_letters`。买家冲突会创建 cancelled 订单并补偿 Redis，库存不足时以 MySQL 剩余库存为上限收紧 Redis 可售量，非法事件进入人工复核。
 
 后台循环和 Gin 目前在同一个 Go 进程。除了 Relay、订单 Consumer 和 DLQ Reconciler，还包含 pending 超时扫描和 Redis 补偿重试。完整状态机见[阶段 4 秒杀订单生命周期](10-order-lifecycle.md)。
 
-当前以 Redis AOF 恢复待投递记录。Compose 使用 `appendfsync always`，主节点要求至少有一个副本在 10 秒内确认复制，三个 Sentinel 以 `hmdp-master` 监控主节点。活动开始后若 Redis 库存记录丢失，初始化命令会拒绝重新发放库存。无效事件、Redis 买家占用与死信不匹配以及 MySQL 库存不一致都会进入人工复核，避免在事实不足时盲目增加库存。
+当前以 Redis AOF 恢复待投递记录。Compose 使用 `appendfsync always`，主节点要求至少有一个副本在 10 秒内确认复制，三个 Sentinel 以 `hmdp-master` 监控主节点。活动开始后若 Redis 库存记录丢失，初始化命令会拒绝重新发放库存。无效事件和无法核对的 Redis 买家占用会进入人工复核，避免在事实不足时盲目增加库存。
 
 ## 本地体验
 
@@ -44,6 +44,7 @@ docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL
 docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/002_seckill_dead_letters.sql
 docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/003_user.sql
 docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/006_order_lifecycle.sql
+docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/007_reservation_anomalies.sql
 
 go run ./cmd/api prepare-seckill -voucher-id 42 -stock 10 \
   -starts-at "$(date -u -d '+30 seconds' +%FT%TZ)" \

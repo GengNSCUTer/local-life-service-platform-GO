@@ -115,7 +115,7 @@ func TestCancelledOrderCanBeReplayedAndBuyerCanPurchaseAgain(t *testing.T) {
 	if err := persistOrder(ctx, db, first); err != nil {
 		t.Fatalf("persist first order: %v", err)
 	}
-	if _, err := service.cancelOrder(ctx, first, "test_cancelled"); err != nil {
+	if _, err := service.cancelOrder(ctx, first, reasonUserCancelled); err != nil {
 		t.Fatalf("cancel first order: %v", err)
 	}
 	if err := persistOrder(ctx, db, first); err != nil {

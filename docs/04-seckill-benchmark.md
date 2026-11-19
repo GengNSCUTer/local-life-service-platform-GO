@@ -55,4 +55,4 @@ scripts/seckill-compensation-smoke.sh
 
 `seckill-compensation-smoke.sh` 预先在 MySQL 写入同一买家的已有订单，再通过正常 HTTP 请求制造一条 Redis 预占事件。消费者将它送入死信，对账器核对 MySQL 事实后自动补偿。脚本检查死信审计结果为 `compensated`、Redis 库存恢复、买家占用和订单事件被删除、MySQL 库存保持不变。
 
-自动补偿有明确边界。无效消息、MySQL 库存不一致、Redis 买家映射缺失或映射不属于当前事件时，结果是 `manual_review`，系统不会直接增加库存。仓库脚本使用 Docker Compose 复现完整拓扑，当前开发环境能够通过 Compose 配置检查，但 Docker socket 权限不足，所以 Compose 容器演练尚未在当前环境启动。相同的本机进程级 Sentinel、Kafka 长积压和补偿演练已经通过。
+无效消息和无法核对买家占用的死信进入 `manual_review`。MySQL 库存不足时，处理流程只允许收紧 Redis 可售量。仓库脚本使用 Docker Compose 复现完整拓扑，当前环境的 Docker socket 权限限制了容器演练。独立进程完成了 Sentinel 切换、Kafka 积压及订单生命周期验证。见[阶段 4 秒杀订单生命周期](10-order-lifecycle.md)。

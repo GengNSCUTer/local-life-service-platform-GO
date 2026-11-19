@@ -22,7 +22,7 @@ export MYSQL_ADDR="127.0.0.1:$mysql_port" MYSQL_USER="${MYSQL_USER:-hmdp}" MYSQL
 export MYSQL_PASSWORD="${MYSQL_PASSWORD:-hmdp_dev_mysql}" REDIS_PASSWORD="$password"
 export REDIS_MASTER_NAME="hmdp-master" REDIS_SENTINEL_ADDRS="127.0.0.1:$sentinel_1_port,127.0.0.1:$sentinel_2_port,127.0.0.1:$sentinel_3_port"
 export KAFKA_BROKERS="127.0.0.1:$kafka_port" HTTP_ADDR="127.0.0.1:$http_port"
-export SECKILL_PENDING_TIMEOUT=5s
+export SECKILL_PENDING_TIMEOUT=120s
 
 compose() { docker compose -p "$project" "$@"; }
 mysql_exec() {
@@ -64,7 +64,8 @@ PY
 wait_status() {
     local token=$1 order_id=$2 wanted=$3
     local output="$work_dir/status-$order_id.json"
-    for attempt in $(seq 1 80); do
+    local deadline=$((SECONDS + ${4:-20}))
+    while (( SECONDS < deadline )); do
         local code
         code=$(curl -sS --max-time 3 -o "$output" -w '%{http_code}' \
             -H "Authorization: Bearer $token" "http://$HTTP_ADDR/voucher-order/$order_id" || true)
@@ -91,11 +92,13 @@ compose up -d --wait mysql redis redis-replica redis-sentinel-1 redis-sentinel-2
 compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/001_seckill.sql
 compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/002_seckill_dead_letters.sql
 compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/006_order_lifecycle.sql
+compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/007_reservation_anomalies.sql
 
-voucher_id=9401
-starts_at=$(date -u -d '+6 seconds' +%FT%TZ)
+voucher_id=$(date +%s%N)
 ends_at=$(date -u -d '+15 minutes' +%FT%TZ)
-go run ./cmd/api prepare-seckill -voucher-id "$voucher_id" -stock 5 -starts-at "$starts_at" -ends-at "$ends_at"
+go build -o "$work_dir/api" ./cmd/api
+starts_at=$(date -u -d '+6 seconds' +%FT%TZ)
+"$work_dir/api" prepare-seckill -voucher-id "$voucher_id" -stock 5 -starts-at "$starts_at" -ends-at "$ends_at"
 
 for user_id in 940001 940002 940003 940004; do
     token="phase4-$user_id"
@@ -103,7 +106,7 @@ for user_id in 940001 940002 940003 940004; do
     redis_exec EXPIRE "login:token:$token" 600 >/dev/null
 done
 
-go run ./cmd/api >"$work_dir/api.log" 2>&1 &
+"$work_dir/api" >"$work_dir/api.log" 2>&1 &
 api_pid=$!
 for attempt in $(seq 1 60); do
     if curl -fsS --max-time 2 "http://$HTTP_ADDR/health/ready" >/dev/null 2>&1; then
@@ -126,14 +129,32 @@ wait_status phase4-940001 "$first_order" cancelled
 replacement_order=$(submit phase4-940001)
 wait_status phase4-940001 "$replacement_order" confirmed
 
-compose pause kafka >/dev/null
+compose stop kafka >/dev/null
 recovered_order=$(submit phase4-940002)
-sleep 1
-compose unpause kafka >/dev/null
-wait_status phase4-940002 "$recovered_order" confirmed
+wait_status phase4-940002 "$recovered_order" pending
+recovered_payload=$(redis_exec GET "seckill:{orders}:order:$recovered_order")
+[[ -n "$recovered_payload" ]]
+compose start kafka >/dev/null
+wait_status phase4-940002 "$recovered_order" confirmed 100
+printf '%s\t%s\n' "$recovered_order" "$recovered_payload" | compose exec -T kafka sh -c \
+    '/opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:9092 --topic hmdp.seckill.order.v1 --property parse.key=true'
+for attempt in $(seq 1 40); do
+    lag=$(compose exec -T kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka:9092 \
+        --describe --group hmdp-seckill-orders-v1 2>/dev/null | awk \
+        '$1 == "hmdp-seckill-orders-v1" && $2 == "hmdp.seckill.order.v1" {
+            if ($6 ~ /^[0-9]+$/) { sum += $6; seen++ }
+            else if ($4 == "-" && $5 == "0") { seen++ }
+        }
+        END { if (seen == 3) print sum; else print -1 }' || true)
+    [[ "$lag" != 0 ]] || break
+    sleep 0.25
+done
+[[ "$lag" == 0 ]]
 
 compose pause kafka >/dev/null
 timed_out_order=$(submit phase4-940003)
+redis_exec DEL "seckill:{orders}:order:$timed_out_order" >/dev/null
+redis_exec ZADD 'seckill:{orders}:timeouts' 0 "$timed_out_order" >/dev/null
 wait_status phase4-940003 "$timed_out_order" cancelled
 compose unpause kafka >/dev/null
 

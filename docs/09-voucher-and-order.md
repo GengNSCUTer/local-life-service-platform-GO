@@ -21,11 +21,12 @@
 
 ## 本地体验
 
-新库按编号应用迁移 `001` 至 `006`。已经完成阶段 3 时只需执行订单生命周期迁移。应用的秒杀 Worker 会在后台创建所需 Kafka 主题，新业务活动可直接通过 HTTP 创建。原来的 `prepare-seckill` 命令用于隔离环境的压测和故障演练。
+新库按编号应用迁移 `001` 至 `007`。已经完成阶段 3 时执行新增迁移。应用的秒杀 Worker 会在后台创建所需 Kafka 主题，新业务活动可直接通过 HTTP 创建。原来的 `prepare-seckill` 命令用于隔离环境的压测和故障演练。
 
 ```bash
 docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/005_voucher.sql
 docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/006_order_lifecycle.sql
+docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/007_reservation_anomalies.sql
 SHOP_ADMIN_USER_ID=7 VOUCHER_ADMIN_USER_ID=7 AUTH_DEV_LOG_CODES=true go run ./cmd/api
 ```
 
@@ -62,6 +63,6 @@ curl -fsS -H "Authorization: Bearer $buyer_token" "$base/voucher-order?current=1
 本地启动两台 API 及独立的 MySQL、Redis、Kafka。两台 API 并发提交 12 次相同的创建请求，产生一条活动记录。开售后同一用户并发提交 16 次，只有一次预占成功。验证了未开始、已结束、售罄、订单归属检查、Kafka 落单和订单分页。故障注入让 Redis 预热失败，恢复后通过相同请求键重试，复用了原优惠券 ID。MySQL 回归测试覆盖最后一份库存扣完后同一订单消息的再次投递。
 
 ```bash
-# 将 HMDP_SECKILL_TEST_DSN 设置为应用过 001_seckill.sql 的隔离数据库连接字符串。
+# 将 HMDP_SECKILL_TEST_DSN 设置为应用过 001 和 006 迁移的隔离数据库连接字符串。
 go test -race ./internal/seckill -run TestPersistOrderCanBeReplayedAfterStockReachesZero -count=1 -v
 ```

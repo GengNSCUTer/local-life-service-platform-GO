@@ -28,12 +28,11 @@ type Service struct {
 	pendingTimeout time.Duration
 }
 
-func New(db *gorm.DB, cache *redis.Client, logger *slog.Logger, pendingTimeout ...time.Duration) *Service {
-	timeout := 15 * time.Minute
-	if len(pendingTimeout) > 0 && pendingTimeout[0] >= time.Second {
-		timeout = pendingTimeout[0]
+func New(db *gorm.DB, cache *redis.Client, logger *slog.Logger, pendingTimeout time.Duration) *Service {
+	if pendingTimeout < time.Second {
+		pendingTimeout = 15 * time.Minute
 	}
-	return &Service{db: db, redis: cache, logger: logger, pendingTimeout: timeout}
+	return &Service{db: db, redis: cache, logger: logger, pendingTimeout: pendingTimeout}
 }
 
 func (s *Service) Register(router *gin.Engine, requireLogin gin.HandlerFunc) {
@@ -62,7 +61,7 @@ func (s *Service) submit(c *gin.Context) {
 	}
 	key := activityKey(voucherID)
 	result, err := reserveStock.Run(ctx, s.redis,
-		[]string{key, key + ":buyers", orderKey(event.ID), outboxKey, timeoutKey},
+		[]string{key, key + ":buyers", orderKey(event.ID), outboxKey, timeoutKey, reservationBackupKey(event.ID)},
 		strconv.FormatUint(userID, 10), event.ID, payload, s.pendingTimeout.Milliseconds()).StringSlice()
 	if err != nil {
 		s.unavailable(c, "reserve stock", err)
@@ -99,37 +98,14 @@ func (s *Service) status(c *gin.Context) {
 	defer cancel()
 	userID, _ := user.CurrentID(ctx)
 
-	var order Order
-	err := s.db.WithContext(ctx).Table("seckill_orders").Take(&order, "id = ?", id).Error
+	order, err := s.findOrder(ctx, id, userID)
 	switch {
-	case err == nil:
-		if order.UserID != userID {
-			httpx.Respond(c, http.StatusNotFound, "order not found", nil)
-			return
-		}
-		httpx.Respond(c, http.StatusOK, "", order)
-	case errors.Is(err, gorm.ErrRecordNotFound):
-		payload, err := s.redis.Get(ctx, orderKey(id)).Bytes()
-		if errors.Is(err, redis.Nil) {
-			httpx.Respond(c, http.StatusNotFound, "order not found", nil)
-			return
-		}
-		if err != nil {
-			s.unavailable(c, "look up reservation", err)
-			return
-		}
-		var event orderEvent
-		if err := json.Unmarshal(payload, &event); err != nil {
-			s.unavailable(c, "decode reservation", err)
-			return
-		}
-		if event.UserID != userID {
-			httpx.Respond(c, http.StatusNotFound, "order not found", nil)
-			return
-		}
-		httpx.Respond(c, http.StatusOK, "", event.order(statusPending))
-	default:
+	case errors.Is(err, errOrderNotFound):
+		httpx.Respond(c, http.StatusNotFound, "order not found", nil)
+	case err != nil:
 		s.unavailable(c, "look up order", err)
+	default:
+		httpx.Respond(c, http.StatusOK, "", order)
 	}
 }
 
@@ -163,7 +139,7 @@ func (s *Service) cancel(c *gin.Context) {
 	ctx, stop := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer stop()
 	userID, _ := user.CurrentID(ctx)
-	event, err := s.findOrderEvent(ctx, id, userID)
+	existing, err := s.findOrder(ctx, id, userID)
 	if errors.Is(err, errOrderNotFound) {
 		httpx.Respond(c, http.StatusNotFound, "order not found", nil)
 		return
@@ -173,7 +149,8 @@ func (s *Service) cancel(c *gin.Context) {
 		return
 	}
 
-	order, err := s.cancelOrder(ctx, event, "user_cancelled")
+	event := existing.event()
+	order, err := s.cancelOrder(ctx, event, reasonUserCancelled)
 	switch {
 	case errors.Is(err, errOrderNotFound):
 		httpx.Respond(c, http.StatusNotFound, "order not found", nil)
@@ -187,7 +164,7 @@ func (s *Service) cancel(c *gin.Context) {
 	}
 
 	syncCtx, syncStop := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 2*time.Second)
-	err = s.syncResolution(syncCtx, event)
+	_, err = s.syncResolution(syncCtx, event)
 	syncStop()
 	result := cancellationResult{Order: order, CompensationPending: err != nil}
 	if err != nil {
@@ -198,37 +175,24 @@ func (s *Service) cancel(c *gin.Context) {
 	httpx.Respond(c, http.StatusOK, "", result)
 }
 
-func (s *Service) findOrderEvent(ctx context.Context, id string, userID uint64) (orderEvent, error) {
-	var order Order
-	err := s.db.WithContext(ctx).Table("seckill_orders").Take(&order, "id = ?", id).Error
-	if err == nil {
-		if order.UserID != userID {
-			return orderEvent{}, errOrderNotFound
+func (s *Service) findOrder(ctx context.Context, id string, userID uint64) (Order, error) {
+	order, err := loadOrder(ctx, s.db, id)
+	if errors.Is(err, errOrderNotFound) {
+		event, _, reservationErr := s.reservation(ctx, id)
+		switch {
+		case reservationErr == nil:
+			order, err = event.order(statusPending), nil
+		case errors.Is(reservationErr, errUnreadableReservation):
+			// Confirmation or cancellation may have committed and removed the Redis payload.
+			order, err = loadOrder(ctx, s.db, id)
+		default:
+			return Order{}, reservationErr
 		}
-		return orderEvent{
-			Version: 1, ID: order.ID, VoucherID: order.VoucherID,
-			UserID: order.UserID, CreatedAt: order.CreatedAt,
-		}, nil
 	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return orderEvent{}, err
+	if err == nil && order.UserID != userID {
+		return Order{}, errOrderNotFound
 	}
-
-	payload, err := s.redis.Get(ctx, orderKey(id)).Bytes()
-	if errors.Is(err, redis.Nil) {
-		return orderEvent{}, errOrderNotFound
-	}
-	if err != nil {
-		return orderEvent{}, err
-	}
-	var event orderEvent
-	if err := json.Unmarshal(payload, &event); err != nil {
-		return orderEvent{}, fmt.Errorf("decode reservation: %w", err)
-	}
-	if event.ID != id || event.UserID != userID {
-		return orderEvent{}, errOrderNotFound
-	}
-	return event, nil
+	return order, err
 }
 
 func (s *Service) unavailable(c *gin.Context, operation string, err error) {

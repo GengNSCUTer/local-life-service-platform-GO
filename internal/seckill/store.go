@@ -2,6 +2,7 @@ package seckill
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -15,7 +16,6 @@ const (
 	statusPending   = "pending"
 	statusConfirmed = "confirmed"
 	statusCancelled = "cancelled"
-	statusReview    = "review_required" // kept for historical records already stored in MySQL
 )
 
 var errOrderConflict = errors.New("order ID or buyer conflicts with an existing order")
@@ -53,8 +53,26 @@ type orderEvent struct {
 	CreatedAt time.Time `json:"occurred_at"`
 }
 
+func (e orderEvent) valid(id string) bool {
+	return e.Version == 1 && e.ID == id && orderIDPattern.MatchString(e.ID) && e.VoucherID > 0 && e.UserID > 0 &&
+		e.CreatedAt.UTC().Year() >= 1000 && e.CreatedAt.UTC().Year() <= 9999
+}
+
 func (e orderEvent) order(status string) Order {
 	return Order{ID: e.ID, VoucherID: e.VoucherID, UserID: e.UserID, Status: status, CreatedAt: e.CreatedAt}
+}
+
+func (o Order) event() orderEvent {
+	return orderEvent{Version: 1, ID: o.ID, VoucherID: o.VoucherID, UserID: o.UserID, CreatedAt: o.CreatedAt}
+}
+
+func loadOrder(ctx context.Context, db *gorm.DB, id string) (Order, error) {
+	var order Order
+	err := db.WithContext(ctx).Table("seckill_orders").Take(&order, "id = ?", id).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return Order{}, errOrderNotFound
+	}
+	return order, err
 }
 
 func createActivity(ctx context.Context, db *gorm.DB, activity Activity) error {
@@ -103,11 +121,22 @@ func persistOrder(ctx context.Context, db *gorm.DB, event orderEvent) error {
 		claim := orderClaim{VoucherID: order.VoucherID, UserID: order.UserID, OrderID: order.ID, CreatedAt: order.CreatedAt}
 		// A duplicate claim rolls back the order and stock change above.
 		return tx.Table("seckill_order_claims").Create(&claim).Error
-	})
+	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if !duplicateKey(err) && !errors.Is(err, errInventoryMismatch) {
 		return err
 	}
 
+	stored, lookupErr := loadOrder(ctx, db, order.ID)
+	if lookupErr == nil {
+		if stored.VoucherID == order.VoucherID && stored.UserID == order.UserID &&
+			(stored.Status == statusConfirmed || stored.Status == statusCancelled) {
+			return nil
+		}
+		return errOrderConflict
+	}
+	if !errors.Is(lookupErr, errOrderNotFound) {
+		return lookupErr
+	}
 	var claim orderClaim
 	lookup := db.WithContext(ctx).Table("seckill_order_claims").Take(&claim,
 		"voucher_id = ? AND user_id = ?", order.VoucherID, order.UserID).Error

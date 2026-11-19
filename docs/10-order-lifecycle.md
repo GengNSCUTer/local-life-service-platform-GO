@@ -50,9 +50,11 @@ stateDiagram-v2
 
 ### pending 超时
 
-每次 Redis 预占都会写入 `seckill:{orders}:timeouts`。[`expireReservations`](../internal/seckill/worker.go) 领取到期订单，创建 cancelled 订单并执行同一套补偿流程。默认超时为 15 分钟，可通过 `SECKILL_PENDING_TIMEOUT` 调整。
+每次 Redis 预占都会写入 `seckill:{orders}:timeouts`。[`expireReservations`](../internal/seckill/worker.go) 领取到期订单，创建 cancelled 订单并执行同一套补偿流程。默认超时为 15 分钟，可通过 `SECKILL_PENDING_TIMEOUT` 调整。如果消费者先完成 MySQL 确认，超时任务只清理 Redis 队列。
 
 Kafka 短暂中断时，outbox 会保留事件并继续重试。中断超过 pending 超时时间后，订单会取消并释放库存。Kafka 随后收到旧事件时会识别 MySQL 中的 cancelled 订单，不再扣减库存。
+
+预占时会写一份独立的 Redis 事件副本，供 Relay、详情查询和超时任务在主事件缺失或损坏时读取。两个副本均不可读且 MySQL 没有对应订单时，后台先写入 `seckill_reservation_anomalies`，再清理队列。该情况保留买家占用和库存变动，供人工按订单 ID 核对。升级前已受理的订单仍可使用原事件。
 
 ## 一人一单与取消后重购
 
@@ -68,9 +70,9 @@ Kafka 消费失败分成三类处理。
 | --- | --- |
 | 非法事件 | 写入 `seckill_dead_letters`，结果为 `manual_review` |
 | 活动买家冲突 | 创建 cancelled 订单，原子恢复 Redis 预占，审计结果为 `compensated` |
-| MySQL 库存不足 | 创建 cancelled 订单，以 MySQL 剩余库存修正 Redis，并记录 `inventory_reconciled` |
+| MySQL 库存不足 | 创建 cancelled 订单，将 Redis 可售量限制在本次读取的 MySQL 剩余库存以内，并记录 `inventory_reconciled` |
 
-Redis 补偿使用每个订单独立的 resolution key。重复执行 Lua 时不会再次增加库存。MySQL 的 resolution 表记录重试次数和最后一次错误，进程重启后仍可继续补偿。
+Redis 补偿使用每个订单独立的 resolution key，标记保留 7 天。重复执行 Lua 时不会再次增加库存。MySQL 的 `redis_synced` 字段是长期事实，进程会先检查它再执行补偿，因此 Redis 标记过期不会导致重复加库存。resolution 表记录重试次数和最后一次错误，进程重启后仍可继续补偿。
 
 ## Go 学习点
 
@@ -81,6 +83,8 @@ Redis 补偿使用每个订单独立的 resolution key。重复执行 Lua 时不
 - GORM `Transaction` 与 `clause.Locking{Strength: "UPDATE"}` 让并发取消、Kafka 落单和重复请求在数据库中串行决定最终状态。
 - Redis Lua 把多个 key 的检查和修改放进一次原子执行，Go 只处理脚本返回的业务结果。
 - Kafka 使用至少一次投递。业务幂等由订单 ID、活动 claim、事务和 Redis resolution 标记共同保证。
+
+升级阶段 4 数据库时，先应用 [007_reservation_anomalies.sql](../migrations/007_reservation_anomalies.sql)，再启动新版本。
 
 ## 验证
 
@@ -93,10 +97,10 @@ go test -race ./...
 bash -n scripts/order-lifecycle-smoke.sh
 ```
 
-端到端脚本会启动隔离依赖并验证取消后重购、Kafka 暂停后恢复、pending 超时、补偿失败后自动重试，以及 MySQL 和 Redis 最终库存一致。
+端到端脚本会启动隔离依赖并验证取消后重购、Kafka 重启和消息重放、pending 超时、补偿失败后自动重试，以及 MySQL 和 Redis 最终库存一致。
 
 ```bash
 scripts/order-lifecycle-smoke.sh
 ```
 
-当前代码已通过 Go 单元测试、静态检查、竞态检测和脚本语法检查。当前执行环境无法访问 Docker socket，因此本轮没有实际启动 Compose 故障脚本。
+本机隔离的 MySQL、Redis 和 Kafka 进程验证了验证码登录、创建活动、订单归属、取消后重购、Kafka 真实重启和重复投递、非法事件审计及 Redis 补偿恢复。MySQL 和 Redis 集成测试还验证了确认订单遇到超时扫描、预占事件主副本损坏以及库存上限修正。当前执行环境缺少 Docker socket 权限，Compose 脚本本身完成了语法检查。

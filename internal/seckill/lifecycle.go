@@ -2,8 +2,10 @@ package seckill
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -14,6 +16,14 @@ import (
 var (
 	errOrderNotFound = errors.New("order not found")
 	errOrderState    = errors.New("order state cannot be cancelled")
+)
+
+const (
+	reasonUserCancelled     = "user_cancelled"
+	reasonPendingTimeout    = "pending_timeout"
+	reasonOrderConflict     = "order_conflict"
+	reasonInventoryMismatch = "inventory_mismatch"
+	reasonInvalidEvent      = "invalid_order_event"
 )
 
 type cancellationResult struct {
@@ -33,52 +43,33 @@ func (s *Service) cancelOrder(ctx context.Context, event orderEvent, reason stri
 				if existing.UserID != event.UserID || existing.VoucherID != event.VoucherID {
 					return errOrderNotFound
 				}
-				switch existing.Status {
-				case statusCancelled:
-					cancelled = existing
-				case statusPending:
-					now := time.Now().UTC().Truncate(time.Millisecond)
-					if err := tx.Table("seckill_orders").Where("id = ? AND status = ?", event.ID, statusPending).
-						Updates(map[string]any{"status": statusCancelled, "cancelled_at": now}).Error; err != nil {
-						return err
-					}
-					if err := tx.Table("seckill_order_claims").Where("order_id = ?", event.ID).Delete(&orderClaim{}).Error; err != nil {
-						return err
-					}
-					existing.Status = statusCancelled
-					existing.CancelledAt = &now
-					cancelled = existing
-				case statusConfirmed:
-					now := time.Now().UTC().Truncate(time.Millisecond)
-					update := tx.Table("seckill_orders").Where("id = ? AND status = ?", event.ID, statusConfirmed).
-						Updates(map[string]any{"status": statusCancelled, "cancelled_at": now})
-					if update.Error != nil {
-						return update.Error
-					}
+				cancelled = existing
+				if existing.Status == statusCancelled || (existing.Status == statusConfirmed && reason != reasonUserCancelled) {
+					return nil
+				}
+				if existing.Status != statusPending && existing.Status != statusConfirmed {
+					return errOrderState
+				}
+				if existing.Status == statusConfirmed {
 					stock := tx.Table("seckill_activities").Where("id = ? AND remaining_stock < total_stock", event.VoucherID).
 						UpdateColumn("remaining_stock", gorm.Expr("remaining_stock + 1"))
 					if stock.Error != nil {
 						return stock.Error
 					}
-					if stock.RowsAffected == 0 {
-						var activity Activity
-						if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("seckill_activities").
-							Take(&activity, "id = ?", event.VoucherID).Error; err != nil {
-							return err
-						}
-						if activity.RemainingStock != activity.TotalStock {
-							return errors.New("MySQL stock cannot be restored")
-						}
+					if stock.RowsAffected != 1 {
+						return errors.New("confirmed order stock cannot be restored")
 					}
-					if err := tx.Table("seckill_order_claims").Where("order_id = ?", event.ID).Delete(&orderClaim{}).Error; err != nil {
-						return err
-					}
-					existing.Status = statusCancelled
-					existing.CancelledAt = &now
-					cancelled = existing
-				default:
-					return errOrderState
 				}
+				now := time.Now().UTC().Truncate(time.Millisecond)
+				if err := tx.Table("seckill_orders").Where("id = ?", event.ID).
+					Updates(map[string]any{"status": statusCancelled, "cancelled_at": now}).Error; err != nil {
+					return err
+				}
+				if err := tx.Table("seckill_order_claims").Where("order_id = ?", event.ID).Delete(&orderClaim{}).Error; err != nil {
+					return err
+				}
+				cancelled.Status = statusCancelled
+				cancelled.CancelledAt = &now
 			case errors.Is(err, gorm.ErrRecordNotFound):
 				now := time.Now().UTC().Truncate(time.Millisecond)
 				cancelled = event.order(statusCancelled)
@@ -92,9 +83,8 @@ func (s *Service) cancelOrder(ctx context.Context, event orderEvent, reason stri
 			return tx.Exec(`
 				INSERT INTO seckill_order_resolutions (order_id, reason, redis_synced)
 				VALUES (?, ?, FALSE)
-				ON DUPLICATE KEY UPDATE reason = VALUES(reason)
 			`, event.ID, reason).Error
-		})
+		}, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 		if err == nil {
 			return cancelled, nil
 		}
@@ -110,24 +100,44 @@ func retryableTransaction(err error) bool {
 	return errors.As(err, &mysqlErr) && (mysqlErr.Number == 1062 || mysqlErr.Number == 1205 || mysqlErr.Number == 1213)
 }
 
-func (s *Service) syncResolution(ctx context.Context, event orderEvent) error {
-	err := s.compensate(ctx, event)
+func (s *Service) syncResolution(ctx context.Context, event orderEvent) (string, error) {
+	var state struct {
+		Reason      string
+		RedisSynced bool
+	}
+	if err := s.db.WithContext(ctx).Table("seckill_order_resolutions").
+		Select("reason, redis_synced").Take(&state, "order_id = ?", event.ID).Error; err != nil {
+		return state.Reason, err
+	}
+	if state.RedisSynced {
+		return state.Reason, nil
+	}
+	stockLimit := ""
+	if state.Reason == reasonInventoryMismatch {
+		var activity Activity
+		if err := s.db.WithContext(ctx).Table("seckill_activities").Select("remaining_stock").
+			Take(&activity, "id = ?", event.VoucherID).Error; err != nil {
+			return state.Reason, err
+		}
+		stockLimit = strconv.FormatUint(uint64(activity.RemainingStock), 10)
+	}
+	err := s.compensate(ctx, event, stockLimit)
 	if err != nil {
 		message := err.Error()
 		if len(message) > 512 {
 			message = message[:512]
 		}
-		if updateErr := s.db.WithContext(ctx).Table("seckill_order_resolutions").Where("order_id = ?", event.ID).
+		if updateErr := s.db.WithContext(ctx).Table("seckill_order_resolutions").Where("order_id = ? AND redis_synced = FALSE", event.ID).
 			Updates(map[string]any{"attempts": gorm.Expr("attempts + 1"), "last_error": message}).Error; updateErr != nil {
-			return errors.Join(err, fmt.Errorf("record compensation failure: %w", updateErr))
+			return state.Reason, errors.Join(err, fmt.Errorf("record compensation failure: %w", updateErr))
 		}
-		return err
+		return state.Reason, err
 	}
-	return s.markResolutionSynced(ctx, event.ID)
+	return state.Reason, s.markResolutionSynced(ctx, event.ID)
 }
 
 func (s *Service) markResolutionSynced(ctx context.Context, orderID string) error {
-	return s.db.WithContext(ctx).Table("seckill_order_resolutions").Where("order_id = ?", orderID).
+	return s.db.WithContext(ctx).Table("seckill_order_resolutions").Where("order_id = ? AND redis_synced = FALSE", orderID).
 		Updates(map[string]any{
 			"redis_synced": true,
 			"attempts":     gorm.Expr("attempts + 1"),

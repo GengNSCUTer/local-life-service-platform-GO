@@ -2,6 +2,7 @@ package seckill
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -13,8 +14,11 @@ import (
 const keyPrefix = "seckill:{orders}:"
 const outboxKey = keyPrefix + "outbox"
 const timeoutKey = keyPrefix + "timeouts"
+const resolutionMarkerTTL = 7 * 24 * time.Hour
 
 var ErrStockWindowStarted = errors.New("Redis stock must be initialized before the activity starts")
+var errReservationMismatch = errors.New("Redis buyer does not match reservation")
+var errUnreadableReservation = errors.New("reservation payload and backup are missing or invalid")
 
 var initActivity = redis.NewScript(`
 local t = redis.call('TIME')
@@ -58,21 +62,11 @@ redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
 redis.call('SET', KEYS[3], ARGV[3])
 redis.call('ZADD', KEYS[4], now, ARGV[2])
 redis.call('ZADD', KEYS[5], now + tonumber(ARGV[4]), ARGV[2])
+redis.call('SET', KEYS[6], ARGV[3])
 return {'accepted', ARGV[2]}
 `)
 
-var claimOutbox = redis.NewScript(`
-local t = redis.call('TIME')
-local now = t[1] * 1000 + math.floor(t[2] / 1000)
-local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, 1)
-if #due == 0 then
-    return nil
-end
-redis.call('ZADD', KEYS[1], now + tonumber(ARGV[1]), due[1])
-return due[1]
-`)
-
-var claimTimeout = redis.NewScript(`
+var claimDue = redis.NewScript(`
 local t = redis.call('TIME')
 local now = t[1] * 1000 + math.floor(t[2] / 1000)
 local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, 1)
@@ -92,14 +86,24 @@ if redis.call('EXISTS', KEYS[1]) == 0 then
     return redis.error_reply('activity is missing')
 end
 if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2] then
-    return redis.error_reply('reservation does not match resolution event')
+    return 2
 end
-redis.call('HINCRBY', KEYS[1], 'stock', 1)
+if ARGV[4] == '' then
+    redis.call('HINCRBY', KEYS[1], 'stock', 1)
+else
+    local current = tonumber(redis.call('HGET', KEYS[1], 'stock'))
+    if not current then
+        return redis.error_reply('activity stock is invalid')
+    end
+    -- The MySQL snapshot can lag behind current Redis reservations.
+    redis.call('HSET', KEYS[1], 'stock', math.min(current, tonumber(ARGV[4])))
+end
 redis.call('HDEL', KEYS[2], ARGV[1])
 redis.call('DEL', KEYS[4])
 redis.call('ZREM', KEYS[5], ARGV[2])
 redis.call('ZREM', KEYS[6], ARGV[2])
-redis.call('SET', resolutionKey, 'compensated')
+redis.call('DEL', KEYS[7])
+redis.call('SET', resolutionKey, 'compensated', 'PX', ARGV[3])
 return 1
 `)
 
@@ -107,29 +111,7 @@ var finalizeReservation = redis.NewScript(`
 redis.call('DEL', KEYS[1])
 redis.call('ZREM', KEYS[2], ARGV[1])
 redis.call('ZREM', KEYS[3], ARGV[1])
-return 1
-`)
-
-var reconcileInventoryReservation = redis.NewScript(`
-local resolutionKey = KEYS[3]
-if redis.call('GET', resolutionKey) == 'inventory_reconciled' then
-    return 0
-end
-if redis.call('EXISTS', KEYS[1]) == 0 then
-    return redis.error_reply('activity is missing')
-end
-local buyer = redis.call('HGET', KEYS[2], ARGV[1])
-if buyer and buyer ~= ARGV[2] then
-    return redis.error_reply('reservation does not match inventory event')
-end
-redis.call('HSET', KEYS[1], 'stock', ARGV[3])
-if buyer == ARGV[2] then
-    redis.call('HDEL', KEYS[2], ARGV[1])
-end
 redis.call('DEL', KEYS[4])
-redis.call('ZREM', KEYS[5], ARGV[2])
-redis.call('ZREM', KEYS[6], ARGV[2])
-redis.call('SET', resolutionKey, 'inventory_reconciled')
 return 1
 `)
 
@@ -139,25 +121,39 @@ func activityKey(id uint64) string {
 
 func orderKey(id string) string { return keyPrefix + "order:" + id }
 
-func (s *Service) compensate(ctx context.Context, event orderEvent) error {
+func reservationBackupKey(id string) string { return keyPrefix + "reservation:" + id }
+
+func (s *Service) reservation(ctx context.Context, id string) (orderEvent, []byte, error) {
+	for _, key := range []string{orderKey(id), reservationBackupKey(id)} {
+		payload, err := s.redis.Get(ctx, key).Bytes()
+		if errors.Is(err, redis.Nil) || redis.HasErrorPrefix(err, "WRONGTYPE") {
+			continue
+		}
+		if err != nil {
+			return orderEvent{}, nil, err
+		}
+		var event orderEvent
+		if json.Unmarshal(payload, &event) == nil && event.valid(id) {
+			return event, payload, nil
+		}
+	}
+	return orderEvent{}, nil, errUnreadableReservation
+}
+
+func (s *Service) compensate(ctx context.Context, event orderEvent, stockLimit string) error {
 	key := activityKey(event.VoucherID)
-	_, err := compensateReservation.Run(ctx, s.redis,
-		[]string{key, key + ":buyers", keyPrefix + "resolution:" + event.ID, orderKey(event.ID), outboxKey, timeoutKey},
-		strconv.FormatUint(event.UserID, 10), event.ID).Int()
+	result, err := compensateReservation.Run(ctx, s.redis,
+		[]string{key, key + ":buyers", keyPrefix + "resolution:" + event.ID, orderKey(event.ID), outboxKey, timeoutKey, reservationBackupKey(event.ID)},
+		strconv.FormatUint(event.UserID, 10), event.ID, resolutionMarkerTTL.Milliseconds(), stockLimit).Int()
+	if err == nil && result == 2 {
+		return errReservationMismatch
+	}
 	return err
 }
 
 func (s *Service) finalize(ctx context.Context, id string) error {
 	return finalizeReservation.Run(ctx, s.redis,
-		[]string{orderKey(id), outboxKey, timeoutKey}, id).Err()
-}
-
-func (s *Service) reconcileInventory(ctx context.Context, event orderEvent, remaining uint32) error {
-	key := activityKey(event.VoucherID)
-	_, err := reconcileInventoryReservation.Run(ctx, s.redis,
-		[]string{key, key + ":buyers", keyPrefix + "resolution:" + event.ID, orderKey(event.ID), outboxKey, timeoutKey},
-		strconv.FormatUint(event.UserID, 10), event.ID, remaining).Int()
-	return err
+		[]string{orderKey(id), outboxKey, timeoutKey, reservationBackupKey(id)}, id).Err()
 }
 
 func (s *Service) Prepare(ctx context.Context, activity Activity) error {

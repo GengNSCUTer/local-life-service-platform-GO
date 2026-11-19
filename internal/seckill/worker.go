@@ -100,11 +100,14 @@ func (s *Service) relay(ctx context.Context, writer *kafka.Writer) {
 }
 
 func (s *Service) publishNext(ctx context.Context, writer *kafka.Writer) error {
-	id, err := claimOutbox.Run(ctx, s.redis, []string{outboxKey}, 15000).Text()
+	id, err := claimDue.Run(ctx, s.redis, []string{outboxKey}, 15000).Text()
 	if err != nil {
 		return err
 	}
-	payload, err := s.redis.Get(ctx, orderKey(id)).Bytes()
+	_, payload, err := s.reservation(ctx, id)
+	if errors.Is(err, errUnreadableReservation) {
+		return s.retireUnreadableReservation(ctx, id)
+	}
 	if err != nil {
 		return fmt.Errorf("load outbox event %s: %w", id, err)
 	}
@@ -133,33 +136,43 @@ func (s *Service) expireReservations(ctx context.Context) {
 }
 
 func (s *Service) expireNext(ctx context.Context) error {
-	id, err := claimTimeout.Run(ctx, s.redis, []string{timeoutKey}, 15000).Text()
+	id, err := claimDue.Run(ctx, s.redis, []string{timeoutKey}, 15000).Text()
 	if err != nil {
 		return err
 	}
-	payload, err := s.redis.Get(ctx, orderKey(id)).Bytes()
-	if errors.Is(err, redis.Nil) {
-		var count int64
-		if err := s.db.WithContext(ctx).Table("seckill_orders").Where("id = ?", id).Count(&count).Error; err != nil {
+	event, _, err := s.reservation(ctx, id)
+	if errors.Is(err, errUnreadableReservation) {
+		return s.retireUnreadableReservation(ctx, id)
+	}
+	if err != nil {
+		return err
+	}
+	order, err := s.cancelOrder(ctx, event, reasonPendingTimeout)
+	if err != nil {
+		return err
+	}
+	if order.Status == statusConfirmed {
+		return s.finalize(ctx, id)
+	}
+	_, err = s.syncResolution(ctx, event)
+	return err
+}
+
+func (s *Service) retireUnreadableReservation(ctx context.Context, id string) error {
+	_, err := loadOrder(ctx, s.db, id)
+	if errors.Is(err, errOrderNotFound) {
+		if err := s.db.WithContext(ctx).Exec(`
+			INSERT INTO seckill_reservation_anomalies (order_id) VALUES (?)
+			ON DUPLICATE KEY UPDATE order_id = order_id
+		`, id).Error; err != nil {
 			return err
 		}
-		if count == 0 {
-			return fmt.Errorf("timed-out reservation %s has no Redis event or MySQL order", id)
-		}
-		return s.redis.ZRem(ctx, timeoutKey, id).Err()
-	}
-	if err != nil {
+		s.logger.Warn("unreadable Redis reservation requires manual review", "order_id", id)
+	} else if err != nil {
 		return err
 	}
-	var event orderEvent
-	if err := json.Unmarshal(payload, &event); err != nil || event.Version != 1 || event.ID != id ||
-		!orderIDPattern.MatchString(event.ID) || event.VoucherID == 0 || event.UserID == 0 || event.CreatedAt.IsZero() {
-		return fmt.Errorf("invalid timed-out reservation %s", id)
-	}
-	if _, err := s.cancelOrder(ctx, event, "pending_timeout"); err != nil {
-		return err
-	}
-	return s.syncResolution(ctx, event)
+	// Remove the queue entries only after preserving the audit record or finding a stored order.
+	return s.finalize(ctx, id)
 }
 
 func (s *Service) reconcileResolutions(ctx context.Context) {
@@ -177,13 +190,17 @@ func (s *Service) reconcileResolutions(ctx context.Context) {
 			continue
 		}
 		for _, event := range events {
+			if ctx.Err() != nil {
+				return
+			}
 			operation, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
-			err := s.syncResolution(operation, event)
+			_, err := s.syncResolution(operation, event)
 			cancel()
 			if err != nil {
 				s.logger.Warn("seckill Redis compensation will retry", "order_id", event.ID, "error", err)
 			}
 		}
+		wait(ctx, 500*time.Millisecond)
 	}
 }
 
@@ -214,18 +231,16 @@ func (s *Service) consume(ctx context.Context, reader *kafka.Reader, writer *kaf
 
 func (s *Service) processMessage(ctx context.Context, writer *kafka.Writer, message kafka.Message) error {
 	var event orderEvent
-	reason := "invalid_order_event"
-	if err := json.Unmarshal(message.Value, &event); err == nil && event.Version == 1 &&
-		orderIDPattern.MatchString(event.ID) && string(message.Key) == event.ID &&
-		event.VoucherID > 0 && event.UserID > 0 && !event.CreatedAt.IsZero() {
+	reason := reasonInvalidEvent
+	if err := json.Unmarshal(message.Value, &event); err == nil && event.valid(string(message.Key)) {
 		err := persistOrder(ctx, s.db, event)
 		switch {
 		case err == nil:
 			return s.finalize(ctx, event.ID)
 		case errors.Is(err, errOrderConflict):
-			reason = "order_conflict"
+			reason = reasonOrderConflict
 		case errors.Is(err, errInventoryMismatch):
-			reason = "inventory_mismatch"
+			reason = reasonInventoryMismatch
 		default:
 			return err
 		}
@@ -264,84 +279,73 @@ func (s *Service) reconcile(ctx context.Context, reader *kafka.Reader) {
 }
 
 func (s *Service) reconcileDeadLetter(ctx context.Context, message kafka.Message) error {
-	var event orderEvent
-	reason := "invalid_order_event"
+	reason := reasonInvalidEvent
 	for _, header := range message.Headers {
 		if header.Key == "reason" {
-			reason = string(header.Value)
+			switch string(header.Value) {
+			case reasonInventoryMismatch, reasonOrderConflict:
+				reason = string(header.Value)
+			}
 			break
 		}
 	}
-	if err := json.Unmarshal(message.Value, &event); err != nil || event.Version != 1 ||
-		!orderIDPattern.MatchString(event.ID) || event.VoucherID == 0 || event.UserID == 0 {
-		return s.recordDeadLetter(ctx, message, event, reason, "manual_review")
-	}
-	if reason == "inventory_mismatch" {
-		if _, err := s.cancelOrder(ctx, event, reason); err != nil {
+	var event orderEvent
+	outcome := "manual_review"
+	if err := json.Unmarshal(message.Value, &event); err == nil && event.valid(event.ID) && reason != reasonInvalidEvent {
+		var err error
+		outcome, err = s.resolveDeadLetterOrder(ctx, event, reason)
+		if err != nil {
 			return err
 		}
-		var activity Activity
-		if err := s.db.WithContext(ctx).Table("seckill_activities").Take(&activity, "id = ?", event.VoucherID).Error; err != nil {
-			return err
-		}
-		if err := s.reconcileInventory(ctx, event, activity.RemainingStock); err != nil {
-			return fmt.Errorf("reconcile inventory for order %s: %w", event.ID, err)
-		}
-		if err := s.markResolutionSynced(ctx, event.ID); err != nil {
-			return err
-		}
-		return s.recordDeadLetter(ctx, message, event, reason, "inventory_reconciled")
 	}
-	if reason != "order_conflict" {
-		return s.recordDeadLetter(ctx, message, event, reason, "manual_review")
-	}
+	return s.recordDeadLetter(ctx, message, event, reason, outcome)
+}
 
-	var existing Order
-	err := s.db.WithContext(ctx).Table("seckill_orders").Take(&existing, "id = ?", event.ID).Error
-	if err == nil && existing.VoucherID == event.VoucherID && existing.UserID == event.UserID {
-		return s.recordDeadLetter(ctx, message, event, reason, "already_persisted")
+func (s *Service) resolveDeadLetterOrder(ctx context.Context, event orderEvent, reason string) (string, error) {
+	var activity Activity
+	err := s.db.WithContext(ctx).Table("seckill_activities").Select("id").Take(&activity, "id = ?", event.VoucherID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "manual_review", nil
 	}
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
+	if err != nil {
+		return "", err
 	}
-
-	var claim orderClaim
-	err = s.db.WithContext(ctx).Table("seckill_order_claims").Take(&claim,
-		"voucher_id = ? AND user_id = ?", event.VoucherID, event.UserID).Error
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
+	order, err := s.cancelOrder(ctx, event, reason)
+	if errors.Is(err, errOrderNotFound) || errors.Is(err, errOrderState) {
+		return "manual_review", nil
 	}
-	if errors.Is(err, gorm.ErrRecordNotFound) && existing.ID == "" {
-		return s.recordDeadLetter(ctx, message, event, reason, "manual_review")
+	if err != nil {
+		return "", err
 	}
-	if existing.ID == "" {
-		if _, err := s.cancelOrder(ctx, event, reason); err != nil {
-			return err
-		}
-		if err := s.syncResolution(ctx, event); err != nil {
-			return fmt.Errorf("restore reservation for order %s: %w", event.ID, err)
-		}
-	} else if err := s.compensate(ctx, event); err != nil {
-		return fmt.Errorf("restore reservation for order %s: %w", event.ID, err)
+	if order.Status == statusConfirmed {
+		return "already_persisted", s.finalize(ctx, event.ID)
 	}
-	return s.recordDeadLetter(ctx, message, event, reason, "compensated")
+	appliedReason, err := s.syncResolution(ctx, event)
+	if errors.Is(err, errReservationMismatch) {
+		return "manual_review", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if appliedReason == reasonInventoryMismatch {
+		return "inventory_reconciled", nil
+	}
+	return "compensated", nil
 }
 
 func (s *Service) recordDeadLetter(ctx context.Context, message kafka.Message, event orderEvent, reason, outcome string) error {
+	var orderID any
+	if orderIDPattern.MatchString(event.ID) {
+		orderID = event.ID
+	}
+	// Empty Kafka keys and tombstone payloads still need a durable audit row.
 	return s.db.WithContext(ctx).Exec(`
 		INSERT INTO seckill_dead_letters
 			(dlq_partition, dlq_offset, source_key, order_id, voucher_id, user_id, reason, outcome, payload)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE outcome = VALUES(outcome), reason = VALUES(reason)
-	`, message.Partition, message.Offset, message.Key, nullable(event.ID), nullableID(event.VoucherID),
-		nullableID(event.UserID), reason, outcome, message.Value).Error
-}
-
-func nullable(value string) any {
-	if value == "" {
-		return nil
-	}
-	return value
+		ON DUPLICATE KEY UPDATE id = id
+	`, message.Partition, message.Offset, string(message.Key[:min(len(message.Key), 255)]), orderID, nullableID(event.VoucherID),
+		nullableID(event.UserID), reason, outcome, string(message.Value)).Error
 }
 
 func nullableID(value uint64) any {

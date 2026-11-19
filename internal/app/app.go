@@ -94,5 +94,5 @@ func PrepareSeckill(ctx context.Context, cfg config.Config, logger *slog.Logger,
 	if err := seckill.CreateTopics(ctx, deps.kafka); err != nil {
 		return fmt.Errorf("prepare Kafka topics: %w", err)
 	}
-	return seckill.New(deps.mysql, deps.redis, logger).Prepare(ctx, activity)
+	return seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout).Prepare(ctx, activity)
 }

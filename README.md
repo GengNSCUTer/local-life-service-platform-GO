@@ -23,7 +23,7 @@ Compose 启动本地 MySQL、Redis 主节点、Redis 副本、三个 Redis Senti
 
 创建普通券和秒杀活动、预热库存与查询订单历史见[优惠券、活动和订单查询](docs/09-voucher-and-order.md)。
 
-订单取消、pending 超时、补偿重试和异常订单处理见[秒杀订单生命周期](docs/10-order-lifecycle.md)。
+订单取消、pending 超时、补偿重试和异常订单处理见[秒杀订单生命周期](docs/10-order-lifecycle.md)。已有阶段 4 数据库需在启动新版 API 前应用 `007_reservation_anomalies.sql`。
 
 百万和千万请求的复现命令与测量口径见[秒杀接口压测](docs/04-seckill-benchmark.md)。
 
