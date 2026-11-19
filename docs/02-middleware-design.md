@@ -6,11 +6,11 @@
 
 | 组件 | 主要职责 | 是否直接决定请求结果 |
 | --- | --- | --- |
-| Redis | 登录态、热点缓存、库存预占、重复购买判断、Lua 原子操作、Feed 和统计结构 | 是，秒杀请求必须先完成 Redis 资格校验 |
-| Kafka | 订单事件持久化、异步削峰、消费者组分发、失败重试和死信 | 是，Kafka 写入成功后才能返回订单受理成功 |
+| Redis | 登录态、热点缓存、库存预占、重复购买判断、Lua 原子操作、Feed 和统计结构 | 是，原子预占并登记待发事件后返回受理结果 |
+| Kafka | 订单事件持久化、异步削峰、消费者组分发、失败重试和死信 | 处理异步订单事件，可暂时积压在 Redis 待发队列 |
 | MySQL | 用户、商户、优惠券、订单等最终业务事实 | 是，订单最终状态以 MySQL 事务结果为准 |
 
-秒杀请求的同步路径是 `Gin -> Redis Lua -> Kafka Producer`。订单的异步路径是 `Kafka Consumer -> MySQL Transaction`。Redis 不替代 Kafka 的消息持久化职责，Kafka 也不替代 Redis 的低延迟原子判断职责。
+秒杀请求的同步路径是 `Gin → Redis Lua`。订单的异步路径是 `Redis 待发记录 → Kafka → MySQL 事务`。
 
 ## 1. Gin
 
@@ -32,14 +32,14 @@ Token Restore 负责从 `authorization` 请求头恢复用户并刷新 Redis TTL
 
 GORM 负责基础 CRUD、查询条件、事务和连接池管理。秒杀订单的关键写入不使用自动保存关联对象，而是明确执行：
 
-1. 在事务内条件扣减 `tb_seckill_voucher.stock`。
-2. 插入 `tb_voucher_order`。
+1. 在事务内条件扣减 `seckill_activities.remaining_stock`。
+2. 插入 `seckill_orders`。
 3. 处理唯一键冲突和事务回滚。
 
 需要补充或确认的数据库约束：
 
 - `tb_user.phone` 唯一。
-- `tb_voucher_order(user_id, voucher_id)` 唯一，作为一人一单的最终防线。
+- `seckill_orders(voucher_id, user_id)` 唯一，作为一人一单的最终防线。
 - 订单 ID 主键唯一。
 - 关注关系根据业务需要增加 `(user_id, follow_user_id)` 唯一。
 
@@ -53,7 +53,7 @@ Redis 使用边界：
 
 - 登录态和验证码：Hash、String、TTL。
 - 店铺缓存：String、空值缓存和互斥锁。
-- 秒杀资格：Lua、String、Set，订单事件直接进入 Kafka。
+- 秒杀资格与待发事件使用 Lua、Hash、String 和 Sorted Set。
 - Feed 和点赞：Sorted Set。
 - 关注：Set。
 - 附近商户：GEO。
@@ -69,11 +69,9 @@ Kafka 负责秒杀订单事件的异步削峰和可靠消费。Topic 初始规�
 | Topic | 用途 |
 | --- | --- |
 | `hmdp.seckill.order.v1` | 秒杀订单事件 |
-| `hmdp.seckill.order.retry.v1` | 延迟或重试事件，首版可先由应用控制退避 |
-| `hmdp.seckill.order.dlq.v1` | 超过最大重试次数的消息 |
-| `hmdp.seckill.order.audit.v1` | 对账和人工处理审计事件 |
+| `hmdp.seckill.order.dlq.v1` | 无效的消息和确定的订单冲突 |
 
-消息设计必须包含稳定的 `event_id`、`order_id`、`user_id`、`voucher_id`、创建时间和 schema 版本。消费者按 `event_id` 或业务订单键实现幂等。
+消息包含稳定的 `order_id`、`user_id`、`voucher_id`、创建时间和 schema 版本。首版每个订单只有一个事件，因此 `order_id` 也作为事件 ID 和 Kafka 消息键。消费者通过订单 ID 和业务唯一键实现幂等。
 
 Kafka Consumer 的处理顺序：
 
@@ -84,7 +82,7 @@ Kafka Consumer 的处理顺序：
 5. 可重试错误进入退避流程。
 6. 不可恢复错误进入 DLQ，并记录原因。
 
-首版不依赖 Kafka 事务来跨越 Redis 和 MySQL。系统采用至少一次投递、消费幂等、有限重试和补偿对账，避免把跨系统流程描述为 Exactly Once。
+首版以至少一次投递为目标。MySQL 暂时失败时，消费者保留未提交的 offset 并退避重试。库存不一致时，数据库订单记录进入人工核对状态。
 
 ## 5. 日志、指标和追踪
 

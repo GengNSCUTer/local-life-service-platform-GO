@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/config"
+	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/seckill"
 )
 
 // Run owns the HTTP server and shared clients for the lifetime of the process.
@@ -28,8 +29,22 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 	if err != nil {
 		return fmt.Errorf("listen for HTTP: %w", err)
 	}
+	service := seckill.New(deps.mysql, deps.redis, logger)
+	router := newRouter(logger, deps.probes())
+	service.Register(router)
+	workerCtx, stopWorkers := context.WithCancel(context.WithoutCancel(ctx))
+	workersDone := make(chan error, 1)
+	go func() {
+		workersDone <- service.RunWorkers(workerCtx, cfg.KafkaBrokers, deps.kafkaTransport)
+	}()
+	defer func() {
+		stopWorkers()
+		if err := <-workersDone; err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("close seckill workers: %w", err))
+		}
+	}()
 	server := &http.Server{
-		Handler:           newRouter(logger, deps.probes()),
+		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -59,4 +74,16 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 	}
 	logger.Info("http server stopped")
 	return nil
+}
+
+func PrepareSeckill(ctx context.Context, cfg config.Config, logger *slog.Logger, activity seckill.Activity) (prepareErr error) {
+	deps, err := openClients(cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { prepareErr = errors.Join(prepareErr, deps.close()) }()
+	if err := seckill.CreateTopics(ctx, deps.kafka); err != nil {
+		return fmt.Errorf("prepare Kafka topics: %w", err)
+	}
+	return seckill.New(deps.mysql, deps.redis, logger).Prepare(ctx, activity)
 }

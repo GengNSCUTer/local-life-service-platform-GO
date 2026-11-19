@@ -21,7 +21,7 @@ services:
 
   redis:
     image: redis:7.2
-    command: ['redis-server', '--appendonly', 'yes', '--requirepass', '${REDIS_PASSWORD:-hmdp_dev_redis}']
+    command: ['redis-server', '--appendonly', 'yes', '--appendfsync', 'always', '--requirepass', '${REDIS_PASSWORD:-hmdp_dev_redis}']
     environment:
       REDISCLI_AUTH: ${REDIS_PASSWORD:-hmdp_dev_redis}
     ports:

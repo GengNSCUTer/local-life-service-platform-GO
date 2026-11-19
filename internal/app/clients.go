@@ -34,6 +34,7 @@ func openClients(cfg config.Config) (*clients, error) {
 	mysqlConfig.Passwd = cfg.MySQLPassword
 	mysqlConfig.DBName = cfg.MySQLDatabase
 	mysqlConfig.ParseTime = true
+	mysqlConfig.Loc = time.UTC
 	mysqlConfig.Timeout = 3 * time.Second
 	connector, err := mysqldriver.NewConnector(mysqlConfig)
 	if err != nil {

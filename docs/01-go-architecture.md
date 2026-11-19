@@ -15,7 +15,8 @@ flowchart LR
     User --> Redis[(Redis)]
     Shop --> Redis
     Seckill --> Redis
-    Seckill --> Kafka[(Kafka)]
+    Redis --> Relay[秒杀投递任务]
+    Relay --> Kafka[(Kafka)]
     User --> MySQL[(MySQL)]
     Shop --> MySQL
     Voucher --> MySQL

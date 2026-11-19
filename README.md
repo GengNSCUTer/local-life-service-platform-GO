@@ -1,6 +1,6 @@
 # Local Life Service Platform Go
 
-这是本地生活服务平台的 Go 重构项目。Java 版提供业务和 API 参考，Go 版从模块化单体起步。秒杀阶段将用 Redis Lua 做资格校验和库存预占，用 Kafka 投递订单事件，由消费者在 MySQL 事务中落单。
+这是本地生活服务平台的 Go 重构项目。Java 版提供业务和 API 参考，Go 版从模块化单体起步。首个业务模块使用 Redis Lua 预占秒杀库存，后台投递 Kafka 订单事件，消费者通过 MySQL 事务落单。
 
 ## 运行开发环境
 
@@ -15,7 +15,9 @@ docker compose up -d --wait
 go run ./cmd/api
 ```
 
-Compose 启动本地 MySQL、Redis、单节点 Kafka。默认只绑定本机，端口分别为 `23306`、`26379`、`29092`。MySQL 初始化 `hmdp` 空库，业务表和 Kafka Topic 会随秒杀模块引入。API 从进程环境变量读取配置，API 与 Compose 可以共用 `.env.example` 中的设置。连接独立服务时，可覆盖 `MYSQL_ADDR`、`REDIS_ADDR` 和逗号分隔的 `KAFKA_BROKERS`。
+Compose 启动本地 MySQL、Redis、单节点 Kafka。默认只绑定本机，端口分别为 `23306`、`26379`、`29092`。MySQL 初始化 `hmdp` 空库。API 从进程环境变量读取配置，API 与 Compose 可以共用 `.env.example` 中的设置。连接独立服务时，可覆盖 `MYSQL_ADDR`、`REDIS_ADDR` 和逗号分隔的 `KAFKA_BROKERS`。
+
+按[秒杀联调步骤](docs/03-seckill-design.md#本地体验)执行 SQL 迁移、准备活动并体验抢券与订单查询。
 
 ## 验证 API
 

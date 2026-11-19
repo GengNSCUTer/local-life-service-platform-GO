@@ -13,7 +13,7 @@ Java 基线项目已经实现了课程中的主要业务能力。评论 Controll
 | 用户 | 验证码登录、Token 会话、用户资料、签到 | `tb_user`、`tb_user_info`、`tb_sign` | String、Hash、Bitmap | 否 |
 | 商户 | 类型、详情、名称查询、缓存、附近商户 | `tb_shop`、`tb_shop_type` | String、GEO、互斥锁 | 否 |
 | 优惠券 | 普通券、秒杀券、店铺券列表 | `tb_voucher`、`tb_seckill_voucher` | String、计数器 | 否 |
-| 秒杀订单 | 抢购、库存预占、一人一单、订单落库 | `tb_voucher_order` | Lua、Set、String | Kafka |
+| 秒杀订单 | 抢购、库存预占、一人一单、订单落库 | `seckill_activities`、`seckill_orders` | Lua、Hash、String、Sorted Set | Kafka |
 | 探店内容 | 发布、热门、个人内容、详情 | `tb_blog` | Sorted Set、Feed | 否 |
 | 点赞 | 点赞、取消点赞、点赞排行 | `tb_blog` | Set 或 Sorted Set | 否 |
 | 关注 | 关注、取关、共同关注 | `tb_follow` | Set | 否 |
@@ -52,7 +52,7 @@ Go 版本不使用 Java ThreadLocal。请求范围的数据放在 `context.Conte
 
 1. API 校验用户身份和请求参数。
 2. Redis Lua 同时检查活动库存、用户是否重复购买、扣减 Redis 库存并写入订单事件。
-3. API 快速返回订单受理结果。
+3. API 返回 `202` 和订单 ID。后台从 Redis 待投递队列发布到 Kafka。
 4. Kafka Consumer Group 消费订单事件。
 5. Consumer 在 MySQL 事务中条件扣减数据库库存并插入订单。
 6. 数据库唯一约束和消费幂等共同保证一人一单。
