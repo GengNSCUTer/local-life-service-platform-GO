@@ -19,6 +19,8 @@ Compose 启动本地 MySQL、Redis 主节点、Redis 副本、三个 Redis Senti
 
 按[秒杀联调步骤](docs/03-seckill-design.md#本地体验)应用 SQL 迁移并准备活动。[用户登录与鉴权](docs/07-user-authentication.md)提供验证码登录、跨实例会话与真实 Token 抢券的联调步骤。
 
+店铺分类、列表、详情与维护的迁移和联调见[店铺与缓存](docs/08-shop-and-cache.md)。
+
 百万和千万请求的复现命令与测量口径见[秒杀接口压测](docs/04-seckill-benchmark.md)。
 
 ## 验证 API

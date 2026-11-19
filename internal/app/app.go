@@ -11,6 +11,7 @@ import (
 
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/config"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/seckill"
+	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/shop"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/user"
 )
 
@@ -34,7 +35,9 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 	router := newRouter(logger, deps.probes())
 	users := user.New(deps.mysql, deps.redis, logger, cfg.AuthDevLogCodes)
 	users.Register(router)
-	service.Register(router, users.RequireLogin())
+	requireLogin := users.RequireLogin()
+	service.Register(router, requireLogin)
+	shop.New(deps.mysql, deps.redis, logger, cfg.ShopAdminUserID).Register(router, requireLogin)
 	workerCtx, stopWorkers := context.WithCancel(context.WithoutCancel(ctx))
 	workersDone := make(chan error, 1)
 	go func() {
