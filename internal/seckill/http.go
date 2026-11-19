@@ -22,13 +22,18 @@ import (
 var orderIDPattern = regexp.MustCompile(`^[A-Z2-7]{26}$`)
 
 type Service struct {
-	db     *gorm.DB
-	redis  *redis.Client
-	logger *slog.Logger
+	db             *gorm.DB
+	redis          *redis.Client
+	logger         *slog.Logger
+	pendingTimeout time.Duration
 }
 
-func New(db *gorm.DB, cache *redis.Client, logger *slog.Logger) *Service {
-	return &Service{db: db, redis: cache, logger: logger}
+func New(db *gorm.DB, cache *redis.Client, logger *slog.Logger, pendingTimeout ...time.Duration) *Service {
+	timeout := 15 * time.Minute
+	if len(pendingTimeout) > 0 && pendingTimeout[0] >= time.Second {
+		timeout = pendingTimeout[0]
+	}
+	return &Service{db: db, redis: cache, logger: logger, pendingTimeout: timeout}
 }
 
 func (s *Service) Register(router *gin.Engine, requireLogin gin.HandlerFunc) {
@@ -36,6 +41,7 @@ func (s *Service) Register(router *gin.Engine, requireLogin gin.HandlerFunc) {
 	orders.POST("/seckill/:id", s.submit)
 	orders.GET("/:id", s.status)
 	orders.GET("", s.listOrders)
+	orders.POST("/:id/cancel", s.cancel)
 }
 
 func (s *Service) submit(c *gin.Context) {
@@ -55,8 +61,9 @@ func (s *Service) submit(c *gin.Context) {
 		return
 	}
 	key := activityKey(voucherID)
-	result, err := reserveStock.Run(ctx, s.redis, []string{key, key + ":buyers", orderKey(event.ID), outboxKey},
-		strconv.FormatUint(userID, 10), event.ID, payload).StringSlice()
+	result, err := reserveStock.Run(ctx, s.redis,
+		[]string{key, key + ":buyers", orderKey(event.ID), outboxKey, timeoutKey},
+		strconv.FormatUint(userID, 10), event.ID, payload, s.pendingTimeout.Milliseconds()).StringSlice()
 	if err != nil {
 		s.unavailable(c, "reserve stock", err)
 		return
@@ -144,6 +151,84 @@ func (s *Service) listOrders(c *gin.Context) {
 		return
 	}
 	httpx.Respond(c, http.StatusOK, "", orders)
+}
+
+func (s *Service) cancel(c *gin.Context) {
+	id := c.Param("id")
+	if !orderIDPattern.MatchString(id) {
+		httpx.Respond(c, http.StatusBadRequest, "invalid order ID", nil)
+		return
+	}
+
+	ctx, stop := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer stop()
+	userID, _ := user.CurrentID(ctx)
+	event, err := s.findOrderEvent(ctx, id, userID)
+	if errors.Is(err, errOrderNotFound) {
+		httpx.Respond(c, http.StatusNotFound, "order not found", nil)
+		return
+	}
+	if err != nil {
+		s.unavailable(c, "load order for cancellation", err)
+		return
+	}
+
+	order, err := s.cancelOrder(ctx, event, "user_cancelled")
+	switch {
+	case errors.Is(err, errOrderNotFound):
+		httpx.Respond(c, http.StatusNotFound, "order not found", nil)
+		return
+	case errors.Is(err, errOrderState):
+		httpx.Respond(c, http.StatusConflict, "order cannot be cancelled in its current state", nil)
+		return
+	case err != nil:
+		s.unavailable(c, "cancel order", err)
+		return
+	}
+
+	syncCtx, syncStop := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 2*time.Second)
+	err = s.syncResolution(syncCtx, event)
+	syncStop()
+	result := cancellationResult{Order: order, CompensationPending: err != nil}
+	if err != nil {
+		s.logger.Warn("cancelled order is waiting for Redis compensation", "order_id", id, "error", err)
+		httpx.Respond(c, http.StatusAccepted, "", result)
+		return
+	}
+	httpx.Respond(c, http.StatusOK, "", result)
+}
+
+func (s *Service) findOrderEvent(ctx context.Context, id string, userID uint64) (orderEvent, error) {
+	var order Order
+	err := s.db.WithContext(ctx).Table("seckill_orders").Take(&order, "id = ?", id).Error
+	if err == nil {
+		if order.UserID != userID {
+			return orderEvent{}, errOrderNotFound
+		}
+		return orderEvent{
+			Version: 1, ID: order.ID, VoucherID: order.VoucherID,
+			UserID: order.UserID, CreatedAt: order.CreatedAt,
+		}, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return orderEvent{}, err
+	}
+
+	payload, err := s.redis.Get(ctx, orderKey(id)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return orderEvent{}, errOrderNotFound
+	}
+	if err != nil {
+		return orderEvent{}, err
+	}
+	var event orderEvent
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return orderEvent{}, fmt.Errorf("decode reservation: %w", err)
+	}
+	if event.ID != id || event.UserID != userID {
+		return orderEvent{}, errOrderNotFound
+	}
+	return event, nil
 }
 
 func (s *Service) unavailable(c *gin.Context, operation string, err error) {

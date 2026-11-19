@@ -37,9 +37,13 @@ func CreateTopics(ctx context.Context, client *kafka.Client) error {
 // RunWorkers returns after all loops and their Kafka clients have stopped.
 func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafka.Client, transport *kafka.Transport,
 	relayWorkers, consumerWorkers int) error {
+	var workers sync.WaitGroup
+	workers.Go(func() { s.expireReservations(ctx) })
+	workers.Go(func() { s.reconcileResolutions(ctx) })
 	if !s.retry(ctx, "provision topics", func(operation context.Context) error {
 		return CreateTopics(operation, client)
 	}) {
+		workers.Wait()
 		return nil
 	}
 	if relayWorkers < 1 {
@@ -54,7 +58,6 @@ func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafk
 		ReadTimeout: 3 * time.Second, WriteTimeout: 3 * time.Second,
 	}
 	readers := make([]*kafka.Reader, 0, consumerWorkers)
-	var workers sync.WaitGroup
 	for i := 0; i < relayWorkers; i++ {
 		workers.Go(func() { s.relay(ctx, writer) })
 	}
@@ -112,6 +115,78 @@ func (s *Service) publishNext(ctx context.Context, writer *kafka.Writer) error {
 	return s.redis.ZRem(ctx, outboxKey, id).Err()
 }
 
+func (s *Service) expireReservations(ctx context.Context) {
+	for ctx.Err() == nil {
+		operation, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		err := s.expireNext(operation)
+		cancel()
+		switch {
+		case err == nil:
+			continue
+		case errors.Is(err, redis.Nil):
+			wait(ctx, 100*time.Millisecond)
+		default:
+			s.logger.Warn("seckill timeout worker will retry", "error", err)
+			wait(ctx, time.Second)
+		}
+	}
+}
+
+func (s *Service) expireNext(ctx context.Context) error {
+	id, err := claimTimeout.Run(ctx, s.redis, []string{timeoutKey}, 15000).Text()
+	if err != nil {
+		return err
+	}
+	payload, err := s.redis.Get(ctx, orderKey(id)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		var count int64
+		if err := s.db.WithContext(ctx).Table("seckill_orders").Where("id = ?", id).Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			return fmt.Errorf("timed-out reservation %s has no Redis event or MySQL order", id)
+		}
+		return s.redis.ZRem(ctx, timeoutKey, id).Err()
+	}
+	if err != nil {
+		return err
+	}
+	var event orderEvent
+	if err := json.Unmarshal(payload, &event); err != nil || event.Version != 1 || event.ID != id ||
+		!orderIDPattern.MatchString(event.ID) || event.VoucherID == 0 || event.UserID == 0 || event.CreatedAt.IsZero() {
+		return fmt.Errorf("invalid timed-out reservation %s", id)
+	}
+	if _, err := s.cancelOrder(ctx, event, "pending_timeout"); err != nil {
+		return err
+	}
+	return s.syncResolution(ctx, event)
+}
+
+func (s *Service) reconcileResolutions(ctx context.Context) {
+	for ctx.Err() == nil {
+		operation, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		events, err := s.pendingResolutions(operation, 20)
+		cancel()
+		if err != nil {
+			s.logger.Warn("seckill compensation scan will retry", "error", err)
+			wait(ctx, time.Second)
+			continue
+		}
+		if len(events) == 0 {
+			wait(ctx, 500*time.Millisecond)
+			continue
+		}
+		for _, event := range events {
+			operation, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			err := s.syncResolution(operation, event)
+			cancel()
+			if err != nil {
+				s.logger.Warn("seckill Redis compensation will retry", "order_id", event.ID, "error", err)
+			}
+		}
+	}
+}
+
 func (s *Service) consume(ctx context.Context, reader *kafka.Reader, writer *kafka.Writer) {
 	for ctx.Err() == nil {
 		message, err := reader.FetchMessage(ctx)
@@ -146,7 +221,7 @@ func (s *Service) processMessage(ctx context.Context, writer *kafka.Writer, mess
 		err := persistOrder(ctx, s.db, event)
 		switch {
 		case err == nil:
-			return nil
+			return s.finalize(ctx, event.ID)
 		case errors.Is(err, errOrderConflict):
 			reason = "order_conflict"
 		case errors.Is(err, errInventoryMismatch):
@@ -201,23 +276,52 @@ func (s *Service) reconcileDeadLetter(ctx context.Context, message kafka.Message
 		!orderIDPattern.MatchString(event.ID) || event.VoucherID == 0 || event.UserID == 0 {
 		return s.recordDeadLetter(ctx, message, event, reason, "manual_review")
 	}
+	if reason == "inventory_mismatch" {
+		if _, err := s.cancelOrder(ctx, event, reason); err != nil {
+			return err
+		}
+		var activity Activity
+		if err := s.db.WithContext(ctx).Table("seckill_activities").Take(&activity, "id = ?", event.VoucherID).Error; err != nil {
+			return err
+		}
+		if err := s.reconcileInventory(ctx, event, activity.RemainingStock); err != nil {
+			return fmt.Errorf("reconcile inventory for order %s: %w", event.ID, err)
+		}
+		if err := s.markResolutionSynced(ctx, event.ID); err != nil {
+			return err
+		}
+		return s.recordDeadLetter(ctx, message, event, reason, "inventory_reconciled")
+	}
 	if reason != "order_conflict" {
 		return s.recordDeadLetter(ctx, message, event, reason, "manual_review")
 	}
 
 	var existing Order
-	err := s.db.WithContext(ctx).Table("seckill_orders").Take(&existing,
-		"voucher_id = ? AND user_id = ?", event.VoucherID, event.UserID).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return s.recordDeadLetter(ctx, message, event, reason, "manual_review")
-	}
-	if err != nil {
-		return err
-	}
-	if existing.ID == event.ID {
+	err := s.db.WithContext(ctx).Table("seckill_orders").Take(&existing, "id = ?", event.ID).Error
+	if err == nil && existing.VoucherID == event.VoucherID && existing.UserID == event.UserID {
 		return s.recordDeadLetter(ctx, message, event, reason, "already_persisted")
 	}
-	if err := s.compensate(ctx, event); err != nil {
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+
+	var claim orderClaim
+	err = s.db.WithContext(ctx).Table("seckill_order_claims").Take(&claim,
+		"voucher_id = ? AND user_id = ?", event.VoucherID, event.UserID).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) && existing.ID == "" {
+		return s.recordDeadLetter(ctx, message, event, reason, "manual_review")
+	}
+	if existing.ID == "" {
+		if _, err := s.cancelOrder(ctx, event, reason); err != nil {
+			return err
+		}
+		if err := s.syncResolution(ctx, event); err != nil {
+			return fmt.Errorf("restore reservation for order %s: %w", event.ID, err)
+		}
+	} else if err := s.compensate(ctx, event); err != nil {
 		return fmt.Errorf("restore reservation for order %s: %w", event.ID, err)
 	}
 	return s.recordDeadLetter(ctx, message, event, reason, "compensated")

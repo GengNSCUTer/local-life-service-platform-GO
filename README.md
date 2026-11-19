@@ -23,6 +23,8 @@ Compose 启动本地 MySQL、Redis 主节点、Redis 副本、三个 Redis Senti
 
 创建普通券和秒杀活动、预热库存与查询订单历史见[优惠券、活动和订单查询](docs/09-voucher-and-order.md)。
 
+订单取消、pending 超时、补偿重试和异常订单处理见[秒杀订单生命周期](docs/10-order-lifecycle.md)。
+
 百万和千万请求的复现命令与测量口径见[秒杀接口压测](docs/04-seckill-benchmark.md)。
 
 ## 验证 API
@@ -39,12 +41,13 @@ go vet ./...
 - `Ctrl+C` 或 `SIGTERM` 会让 API 停止接收新连接，给正在处理的请求最多 10 秒完成，然后关闭客户端。
 - `docker compose down` 停止本地中间件并保留数据卷。
 
-本阶段通过了 `go test -race ./...`、`go vet ./...` 和 Compose 配置检查。使用独立的 MySQL 8.0.33、Redis 7.2.11 和 Kafka 4.1.2 验证了依赖全部就绪、Kafka 停机恢复、Redis Sentinel 主从切换、10,000 条 Kafka 长积压恢复、死信自动补偿、非法消息审计和 API 收到 `SIGTERM` 后退出。仓库提供了三个可复现脚本，分别验证 Redis Sentinel 故障切换、Kafka 长积压恢复和死信自动补偿。当前环境的 Docker daemon 访问权限限制了 Compose 脚本的实际启动验证，但本机进程级故障演练已经通过。
+本项目通过了 `go test -race ./...` 和 `go vet ./...`。早期阶段使用独立的 MySQL 8.0.33、Redis 7.2.11 和 Kafka 4.1.2 验证了 Kafka 停机恢复、Redis Sentinel 主从切换、10,000 条 Kafka 长积压恢复、死信自动补偿、非法消息审计和优雅停机。仓库提供可复现故障脚本。当前环境没有 Docker socket 权限，阶段 4 新增的订单生命周期脚本已完成语法检查，仍需在有 Docker 权限的环境执行。
 
 ```bash
 scripts/redis-sentinel-smoke.sh
 BACKLOG_MESSAGES=10000 scripts/kafka-backlog-smoke.sh
 scripts/seckill-compensation-smoke.sh
+scripts/order-lifecycle-smoke.sh
 ```
 
 ## 从哪里读代码

@@ -8,11 +8,13 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
 	statusPending   = "pending"
 	statusConfirmed = "confirmed"
+	statusCancelled = "cancelled"
 	statusReview    = "review_required" // kept for historical records already stored in MySQL
 )
 
@@ -28,11 +30,19 @@ type Activity struct {
 }
 
 type Order struct {
-	ID        string    `json:"orderId"`
-	VoucherID uint64    `json:"voucherId"`
-	UserID    uint64    `json:"-"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID          string     `json:"orderId"`
+	VoucherID   uint64     `json:"voucherId"`
+	UserID      uint64     `json:"-"`
+	Status      string     `json:"status"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	CancelledAt *time.Time `json:"cancelledAt,omitempty"`
+}
+
+type orderClaim struct {
+	VoucherID uint64
+	UserID    uint64
+	OrderID   string
+	CreatedAt time.Time
 }
 
 type orderEvent struct {
@@ -66,6 +76,19 @@ func createActivity(ctx context.Context, db *gorm.DB, activity Activity) error {
 func persistOrder(ctx context.Context, db *gorm.DB, event orderEvent) error {
 	order := event.order(statusConfirmed)
 	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var existing Order
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("seckill_orders").
+			Take(&existing, "id = ?", order.ID).Error
+		if err == nil {
+			if existing.VoucherID == order.VoucherID && existing.UserID == order.UserID &&
+				(existing.Status == statusConfirmed || existing.Status == statusCancelled) {
+				return nil
+			}
+			return errOrderConflict
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
 		update := tx.Table("seckill_activities").Where("id = ? AND remaining_stock > 0", order.VoucherID).
 			UpdateColumn("remaining_stock", gorm.Expr("remaining_stock - 1"))
 		if update.Error != nil {
@@ -74,15 +97,20 @@ func persistOrder(ctx context.Context, db *gorm.DB, event orderEvent) error {
 		if update.RowsAffected == 0 {
 			return errInventoryMismatch
 		}
-		// A duplicate insert rolls back the stock change above.
-		return tx.Table("seckill_orders").Create(&order).Error
+		if err := tx.Table("seckill_orders").Create(&order).Error; err != nil {
+			return err
+		}
+		claim := orderClaim{VoucherID: order.VoucherID, UserID: order.UserID, OrderID: order.ID, CreatedAt: order.CreatedAt}
+		// A duplicate claim rolls back the order and stock change above.
+		return tx.Table("seckill_order_claims").Create(&claim).Error
 	})
 	if !duplicateKey(err) && !errors.Is(err, errInventoryMismatch) {
 		return err
 	}
 
-	var existing Order
-	lookup := db.WithContext(ctx).Table("seckill_orders").Take(&existing, "voucher_id = ? AND user_id = ?", order.VoucherID, order.UserID).Error
+	var claim orderClaim
+	lookup := db.WithContext(ctx).Table("seckill_order_claims").Take(&claim,
+		"voucher_id = ? AND user_id = ?", order.VoucherID, order.UserID).Error
 	if errors.Is(lookup, gorm.ErrRecordNotFound) {
 		if errors.Is(err, errInventoryMismatch) {
 			return err
@@ -92,7 +120,7 @@ func persistOrder(ctx context.Context, db *gorm.DB, event orderEvent) error {
 	if lookup != nil {
 		return fmt.Errorf("check order after duplicate key: %w", lookup)
 	}
-	if existing.ID != order.ID {
+	if claim.OrderID != order.ID {
 		return errOrderConflict
 	}
 	return nil

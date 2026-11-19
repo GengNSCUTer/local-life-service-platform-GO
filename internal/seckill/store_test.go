@@ -14,7 +14,7 @@ import (
 func TestPersistOrderCanBeReplayedAfterStockReachesZero(t *testing.T) {
 	dsn := os.Getenv("HMDP_SECKILL_TEST_DSN")
 	if dsn == "" {
-		t.Skip("set HMDP_SECKILL_TEST_DSN to an isolated database with the seckill migration")
+		t.Skip("set HMDP_SECKILL_TEST_DSN to an isolated database with migrations 001 and 006")
 	}
 	db, err := gorm.Open(mysql.Open(dsn))
 	if err != nil {
@@ -40,6 +40,12 @@ func TestPersistOrderCanBeReplayedAfterStockReachesZero(t *testing.T) {
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
+		if err := db.WithContext(cleanup).Exec("DELETE r FROM seckill_order_resolutions r JOIN seckill_orders o ON o.id = r.order_id WHERE o.voucher_id = ?", activityID).Error; err != nil {
+			t.Error(err)
+		}
+		if err := db.WithContext(cleanup).Exec("DELETE FROM seckill_order_claims WHERE voucher_id = ?", activityID).Error; err != nil {
+			t.Error(err)
+		}
 		if err := db.WithContext(cleanup).Exec("DELETE FROM seckill_orders WHERE voucher_id = ?", activityID).Error; err != nil {
 			t.Error(err)
 		}
@@ -60,5 +66,80 @@ func TestPersistOrderCanBeReplayedAfterStockReachesZero(t *testing.T) {
 	}
 	if err := db.WithContext(ctx).Table("seckill_activities").Take(&activity, "id = ?", activityID).Error; err != nil || activity.RemainingStock != 0 {
 		t.Fatalf("remaining stock = %d, error = %v", activity.RemainingStock, err)
+	}
+}
+
+func TestCancelledOrderCanBeReplayedAndBuyerCanPurchaseAgain(t *testing.T) {
+	dsn := os.Getenv("HMDP_SECKILL_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set HMDP_SECKILL_TEST_DSN to an isolated database with migrations 001 and 006")
+	}
+	db, err := gorm.Open(mysql.Open(dsn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	activityID := uint64(now.UnixNano())
+	activity := Activity{
+		ID: activityID, TotalStock: 2, RemainingStock: 2,
+		StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Minute),
+	}
+	if err := createActivity(ctx, db, activity); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 3*time.Second)
+		defer stop()
+		for _, query := range []string{
+			"DELETE r FROM seckill_order_resolutions r JOIN seckill_orders o ON o.id = r.order_id WHERE o.voucher_id = ?",
+			"DELETE FROM seckill_order_claims WHERE voucher_id = ?",
+			"DELETE FROM seckill_orders WHERE voucher_id = ?",
+			"DELETE FROM seckill_activities WHERE id = ?",
+		} {
+			if err := db.WithContext(cleanup).Exec(query, activityID).Error; err != nil {
+				t.Error(err)
+			}
+		}
+	}()
+
+	service := &Service{db: db}
+	first := orderEvent{Version: 1, ID: rand.Text(), VoucherID: activityID, UserID: 7, CreatedAt: now}
+	if err := persistOrder(ctx, db, first); err != nil {
+		t.Fatalf("persist first order: %v", err)
+	}
+	if _, err := service.cancelOrder(ctx, first, "test_cancelled"); err != nil {
+		t.Fatalf("cancel first order: %v", err)
+	}
+	if err := persistOrder(ctx, db, first); err != nil {
+		t.Fatalf("replay cancelled event: %v", err)
+	}
+
+	second := orderEvent{Version: 1, ID: rand.Text(), VoucherID: activityID, UserID: 7, CreatedAt: now.Add(time.Millisecond)}
+	if err := persistOrder(ctx, db, second); err != nil {
+		t.Fatalf("persist second order for same buyer: %v", err)
+	}
+
+	var stored Activity
+	if err := db.WithContext(ctx).Table("seckill_activities").Take(&stored, "id = ?", activityID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.RemainingStock != 1 {
+		t.Fatalf("remaining stock = %d, want 1", stored.RemainingStock)
+	}
+	var claim orderClaim
+	if err := db.WithContext(ctx).Table("seckill_order_claims").Take(&claim,
+		"voucher_id = ? AND user_id = ?", activityID, 7).Error; err != nil {
+		t.Fatal(err)
+	}
+	if claim.OrderID != second.ID {
+		t.Fatalf("active claim = %s, want %s", claim.OrderID, second.ID)
 	}
 }

@@ -46,6 +46,7 @@ fi
 compose up -d --wait mysql redis redis-replica redis-sentinel-1 redis-sentinel-2 redis-sentinel-3 kafka
 compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/001_seckill.sql
 compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/002_seckill_dead_letters.sql
+compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/006_order_lifecycle.sql
 
 voucher_id=9301
 starts_at=$(date -u -d '+8 seconds' +%FT%TZ)
@@ -54,6 +55,7 @@ go run ./cmd/api prepare-seckill -voucher-id "$voucher_id" -stock 2 -starts-at "
 
 mysql_exec "UPDATE seckill_activities SET remaining_stock = 1 WHERE id = $voucher_id;"
 mysql_exec "INSERT INTO seckill_orders (id, voucher_id, user_id, status, created_at) VALUES ('conflict-existing', $voucher_id, 930001, 'confirmed', UTC_TIMESTAMP(3));"
+mysql_exec "INSERT INTO seckill_order_claims (voucher_id, user_id, order_id, created_at) VALUES ($voucher_id, 930001, 'conflict-existing', UTC_TIMESTAMP(3));"
 compose exec -T redis redis-cli HSET login:token:compensation-user id 930001 >/dev/null
 compose exec -T redis redis-cli EXPIRE login:token:compensation-user 600 >/dev/null
 

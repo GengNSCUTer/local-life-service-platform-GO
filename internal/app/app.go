@@ -32,7 +32,7 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 	if err != nil {
 		return fmt.Errorf("listen for HTTP: %w", err)
 	}
-	service := seckill.New(deps.mysql, deps.redis, logger)
+	service := seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout)
 	router := newRouter(logger, deps.probes())
 	users := user.New(deps.mysql, deps.redis, logger, cfg.AuthDevLogCodes)
 	users.Register(router)
