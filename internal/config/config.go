@@ -11,6 +11,7 @@ type Config struct {
 	HTTPAddr             string
 	AuthDevLogCodes      bool
 	ShopAdminUserID      uint64
+	VoucherAdminUserID   uint64
 	MySQLAddr            string
 	MySQLUser            string
 	MySQLPassword        string
@@ -40,13 +41,18 @@ func Load() Config {
 
 	authDevLogCodes, _ := strconv.ParseBool(env("AUTH_DEV_LOG_CODES", "false"))
 	shopAdminUserID, err := strconv.ParseUint(env("SHOP_ADMIN_USER_ID", "0"), 10, 64)
+	voucherAdminUserID, voucherErr := strconv.ParseUint(env("VOUCHER_ADMIN_USER_ID", "0"), 10, 64)
 	if err != nil {
 		shopAdminUserID = 0
+	}
+	if voucherErr != nil {
+		voucherAdminUserID = 0
 	}
 	return Config{
 		HTTPAddr:             env("HTTP_ADDR", "127.0.0.1:8080"),
 		AuthDevLogCodes:      authDevLogCodes,
 		ShopAdminUserID:      shopAdminUserID,
+		VoucherAdminUserID:   voucherAdminUserID,
 		MySQLAddr:            env("MYSQL_ADDR", localAddr("MYSQL_PORT", "23306")),
 		MySQLUser:            env("MYSQL_USER", "hmdp"),
 		MySQLPassword:        env("MYSQL_PASSWORD", "hmdp_dev_mysql"),

@@ -21,6 +21,8 @@ Compose 启动本地 MySQL、Redis 主节点、Redis 副本、三个 Redis Senti
 
 店铺分类、列表、详情与维护的迁移和联调见[店铺与缓存](docs/08-shop-and-cache.md)。
 
+创建普通券和秒杀活动、预热库存与查询订单历史见[优惠券、活动和订单查询](docs/09-voucher-and-order.md)。
+
 百万和千万请求的复现命令与测量口径见[秒杀接口压测](docs/04-seckill-benchmark.md)。
 
 ## 验证 API

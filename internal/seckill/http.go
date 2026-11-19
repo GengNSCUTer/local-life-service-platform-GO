@@ -35,6 +35,7 @@ func (s *Service) Register(router *gin.Engine, requireLogin gin.HandlerFunc) {
 	orders := router.Group("/voucher-order", requireLogin)
 	orders.POST("/seckill/:id", s.submit)
 	orders.GET("/:id", s.status)
+	orders.GET("", s.listOrders)
 }
 
 func (s *Service) submit(c *gin.Context) {
@@ -123,6 +124,26 @@ func (s *Service) status(c *gin.Context) {
 	default:
 		s.unavailable(c, "look up order", err)
 	}
+}
+
+func (s *Service) listOrders(c *gin.Context) {
+	page, err := strconv.Atoi(c.DefaultQuery("current", "1"))
+	if err != nil || page < 1 || page > 10000 {
+		httpx.Respond(c, http.StatusBadRequest, "page must be between 1 and 10000", nil)
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
+	userID, _ := user.CurrentID(ctx)
+	const pageSize = 10
+	orders := make([]Order, 0)
+	err = s.db.WithContext(ctx).Table("seckill_orders").Where("user_id = ?", userID).
+		Order("created_at DESC, id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&orders).Error
+	if err != nil {
+		s.unavailable(c, "list orders", err)
+		return
+	}
+	httpx.Respond(c, http.StatusOK, "", orders)
 }
 
 func (s *Service) unavailable(c *gin.Context, operation string, err error) {

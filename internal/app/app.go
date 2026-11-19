@@ -13,6 +13,7 @@ import (
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/seckill"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/shop"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/user"
+	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/voucher"
 )
 
 // Run owns the HTTP server and shared clients for the lifetime of the process.
@@ -38,10 +39,11 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 	requireLogin := users.RequireLogin()
 	service.Register(router, requireLogin)
 	shop.New(deps.mysql, deps.redis, logger, cfg.ShopAdminUserID).Register(router, requireLogin)
+	voucher.New(deps.mysql, logger, cfg.VoucherAdminUserID, service).Register(router, requireLogin)
 	workerCtx, stopWorkers := context.WithCancel(context.WithoutCancel(ctx))
 	workersDone := make(chan error, 1)
 	go func() {
-		workersDone <- service.RunWorkers(workerCtx, cfg.KafkaBrokers, deps.kafkaTransport,
+		workersDone <- service.RunWorkers(workerCtx, cfg.KafkaBrokers, deps.kafka, deps.kafkaTransport,
 			cfg.KafkaRelayWorkers, cfg.KafkaConsumerWorkers)
 	}()
 	defer func() {

@@ -77,17 +77,23 @@ func persistOrder(ctx context.Context, db *gorm.DB, event orderEvent) error {
 		// A duplicate insert rolls back the stock change above.
 		return tx.Table("seckill_orders").Create(&order).Error
 	})
-	if !duplicateKey(err) {
+	if !duplicateKey(err) && !errors.Is(err, errInventoryMismatch) {
 		return err
 	}
 
 	var existing Order
 	lookup := db.WithContext(ctx).Table("seckill_orders").Take(&existing, "voucher_id = ? AND user_id = ?", order.VoucherID, order.UserID).Error
-	if errors.Is(lookup, gorm.ErrRecordNotFound) || (lookup == nil && existing.ID != order.ID) {
+	if errors.Is(lookup, gorm.ErrRecordNotFound) {
+		if errors.Is(err, errInventoryMismatch) {
+			return err
+		}
 		return errOrderConflict
 	}
 	if lookup != nil {
 		return fmt.Errorf("check order after duplicate key: %w", lookup)
+	}
+	if existing.ID != order.ID {
+		return errOrderConflict
 	}
 	return nil
 }

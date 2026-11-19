@@ -36,7 +36,7 @@ flowchart LR
 
 ## 本地体验
 
-按 [README](../README.md) 启动依赖，再从仓库根目录准备独立的 Go 数据表和活动。每次新实验选一个新的 `voucher-id`。
+日常联调通过[优惠券管理接口](09-voucher-and-order.md)创建活动。下面的命令适用于隔离的压测或故障演练环境。按 [README](../README.md) 启动依赖，每次新实验选一个新的 `voucher-id`。
 
 ```bash
 docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/001_seckill.sql

@@ -13,10 +13,16 @@ import (
 const keyPrefix = "seckill:{orders}:"
 const outboxKey = keyPrefix + "outbox"
 
+var ErrStockWindowStarted = errors.New("Redis stock must be initialized before the activity starts")
+
 var initActivity = redis.NewScript(`
 local t = redis.call('TIME')
 local now = t[1] * 1000 + math.floor(t[2] / 1000)
-if redis.call('EXISTS', KEYS[1]) == 1 then
+local existing = redis.call('HMGET', KEYS[1], 'stock', 'starts_at', 'ends_at')
+if existing[1] then
+    if existing[2] ~= ARGV[2] or existing[3] ~= ARGV[3] then
+        return redis.error_reply('existing activity window differs')
+    end
     return 1
 end
 if now >= tonumber(ARGV[2]) then
@@ -104,13 +110,19 @@ func (s *Service) Prepare(ctx context.Context, activity Activity) error {
 	if err := createActivity(ctx, s.db, activity); err != nil {
 		return fmt.Errorf("prepare MySQL activity: %w", err)
 	}
+	return s.InitializeStock(ctx, activity)
+}
+
+// InitializeStock prewarms persisted activity stock before sales open.
+// An existing Redis activity keeps its current stock.
+func (s *Service) InitializeStock(ctx context.Context, activity Activity) error {
 	initialized, err := initActivity.Run(ctx, s.redis, []string{activityKey(activity.ID)},
 		activity.TotalStock, activity.StartsAt.UnixMilli(), activity.EndsAt.UnixMilli()).Int()
 	if err != nil {
 		return fmt.Errorf("prepare Redis stock: %w", err)
 	}
 	if initialized == 0 {
-		return errors.New("Redis stock must be initialized before the activity starts")
+		return ErrStockWindowStarted
 	}
 	return nil
 }

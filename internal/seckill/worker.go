@@ -35,8 +35,13 @@ func CreateTopics(ctx context.Context, client *kafka.Client) error {
 }
 
 // RunWorkers returns after all loops and their Kafka clients have stopped.
-func (s *Service) RunWorkers(ctx context.Context, brokers []string, transport *kafka.Transport,
+func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafka.Client, transport *kafka.Transport,
 	relayWorkers, consumerWorkers int) error {
+	if !s.retry(ctx, "provision topics", func(operation context.Context) error {
+		return CreateTopics(operation, client)
+	}) {
+		return nil
+	}
 	if relayWorkers < 1 {
 		relayWorkers = 1
 	}
