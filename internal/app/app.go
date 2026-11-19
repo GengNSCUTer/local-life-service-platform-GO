@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/config"
+	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/platform/observe"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/seckill"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/shop"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/social"
@@ -33,8 +34,17 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 	if err != nil {
 		return fmt.Errorf("listen for HTTP: %w", err)
 	}
-	service := seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout)
-	router := newRouter(logger, deps.probes())
+	defer listener.Close()
+	registry := diagnosticsRegistry(deps)
+	stopDiagnostics, err := startDiagnostics(cfg.ObservabilityAddr, cfg.PprofEnabled, registry, logger)
+	if err != nil {
+		return err
+	}
+	defer func() { runErr = errors.Join(runErr, stopDiagnostics()) }()
+
+	service := seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout, cfg.SeckillOutboxLimit)
+	service.RegisterMetrics(registry)
+	router := newRouter(logger, deps.probes(), observe.HTTP(registry))
 	users := user.New(deps.mysql, deps.redis, logger, cfg.AuthDevLogCodes)
 	users.Register(router)
 	requireLogin := users.RequireLogin()
@@ -44,7 +54,7 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 	community := social.New(deps.mysql, deps.redis, logger)
 	community.Register(router, requireLogin, users.OptionalLogin())
 	workerCtx, stopWorkers := context.WithCancel(context.WithoutCancel(ctx))
-	workersDone := make(chan error, 2)
+	workersDone := make(chan error, 3)
 	go func() {
 		workersDone <- community.RunWorkers(workerCtx, cfg.KafkaBrokers, deps.kafka, deps.kafkaTransport)
 	}()
@@ -52,9 +62,13 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 		workersDone <- service.RunWorkers(workerCtx, cfg.KafkaBrokers, deps.kafka, deps.kafkaTransport,
 			cfg.KafkaRelayWorkers, cfg.KafkaConsumerWorkers)
 	}()
+	go func() {
+		service.RunMonitoring(workerCtx, deps.kafka, cfg.InventoryAuditInterval)
+		workersDone <- nil
+	}()
 	defer func() {
 		stopWorkers()
-		for range 2 {
+		for range 3 {
 			if err := <-workersDone; err != nil {
 				runErr = errors.Join(runErr, fmt.Errorf("close background workers: %w", err))
 			}
@@ -102,5 +116,14 @@ func PrepareSeckill(ctx context.Context, cfg config.Config, logger *slog.Logger,
 	if err := seckill.CreateTopics(ctx, deps.kafka); err != nil {
 		return fmt.Errorf("prepare Kafka topics: %w", err)
 	}
-	return seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout).Prepare(ctx, activity)
+	return seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout, cfg.SeckillOutboxLimit).Prepare(ctx, activity)
+}
+
+func AuditSeckill(ctx context.Context, cfg config.Config, logger *slog.Logger, voucherID uint64) (_ seckill.InventoryAudit, auditErr error) {
+	deps, err := openClients(cfg)
+	if err != nil {
+		return seckill.InventoryAudit{}, err
+	}
+	defer func() { auditErr = errors.Join(auditErr, deps.close()) }()
+	return seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout, cfg.SeckillOutboxLimit).AuditInventory(ctx, voucherID)
 }

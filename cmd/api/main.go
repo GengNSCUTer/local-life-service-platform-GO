@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -31,6 +32,23 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	cfg := config.Load()
 	if len(args) == 0 {
 		return app.Run(ctx, cfg, logger)
+	}
+	if args[0] == "audit-seckill" {
+		flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
+		id := flags.Uint64("voucher-id", 0, "positive activity ID")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *id == 0 || flags.NArg() != 0 {
+			return errors.New("provide a positive voucher ID")
+		}
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		audit, err := app.AuditSeckill(ctx, cfg, logger, *id)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(audit)
 	}
 	if args[0] != "prepare-seckill" {
 		return fmt.Errorf("unknown command %q", args[0])

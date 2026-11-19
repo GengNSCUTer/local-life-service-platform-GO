@@ -54,6 +54,10 @@ end
 if tonumber(activity[1]) <= 0 then
     return {'sold_out', ''}
 end
+local limit = tonumber(ARGV[5]) or 0
+if limit > 0 and redis.call('ZCARD', KEYS[4]) >= limit then
+    return {'overloaded', ''}
+end
 if redis.call('EXISTS', KEYS[3]) == 1 then
     return redis.error_reply('order ID collision')
 end

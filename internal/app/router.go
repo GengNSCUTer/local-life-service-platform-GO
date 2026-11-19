@@ -16,8 +16,9 @@ type healthProbe struct {
 	check func(context.Context) error
 }
 
-func newRouter(logger *slog.Logger, probes []healthProbe) *gin.Engine {
+func newRouter(logger *slog.Logger, probes []healthProbe, middleware ...gin.HandlerFunc) *gin.Engine {
 	router := gin.New()
+	router.Use(middleware...)
 	router.Use(httpx.RequestID, httpx.AccessLog(logger), httpx.Recovery(logger))
 	router.HandleMethodNotAllowed = true
 	router.NoRoute(func(c *gin.Context) {

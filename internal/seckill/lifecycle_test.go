@@ -33,7 +33,7 @@ func TestReservationRecovery(t *testing.T) {
 	defer pool.Close()
 	cache := redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD")})
 	defer cache.Close()
-	service := New(db, cache, slog.Default(), time.Minute)
+	service := New(db, cache, slog.Default(), time.Minute, 0)
 
 	for _, route := range []string{"confirmed before timeout", "recover backup", "audit missing payload", "inventory mismatch never increases Redis stock"} {
 		t.Run(route, func(t *testing.T) {

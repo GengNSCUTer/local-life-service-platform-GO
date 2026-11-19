@@ -1,0 +1,36 @@
+groups:
+  - name: hmdp-seckill
+    rules:
+      - alert: HMDPDiagnosticsDown
+        expr: up{job="hmdp"} == 0
+        for: 1m
+        annotations:
+          summary: HMDP diagnostics target {{ $labels.instance }} is unreachable
+      - alert: HMDPSeckillDependencySampleStale
+        expr: time() - hmdp_seckill_monitor_last_success_timestamp_seconds{source=~"redis|kafka"} > 60
+        for: 1m
+        annotations:
+          summary: Seckill {{ $labels.source }} metrics have stopped updating
+      - alert: HMDPSeckillInventorySampleStale
+        expr: time() - hmdp_seckill_monitor_last_success_timestamp_seconds{source="inventory"} > 180
+        for: 1m
+        annotations:
+          summary: Seckill inventory scan has stopped completing batches
+      - alert: HMDPSeckillKafkaLag
+        expr: hmdp_seckill_kafka_lag > 1000 and on (job, instance) (time() - hmdp_seckill_monitor_last_success_timestamp_seconds{source="kafka"} < 60)
+        for: 2m
+        annotations:
+          summary: Kafka group {{ $labels.group }} is behind on partition {{ $labels.partition }}
+      - alert: HMDPSeckillOutboxBacklog
+        expr: hmdp_seckill_queue_size{queue="outbox"} > 100 and on (job, instance) (time() - hmdp_seckill_monitor_last_success_timestamp_seconds{source="redis"} < 60)
+        for: 2m
+        annotations:
+          summary: Redis outbox backlog is growing or draining slowly
+      - alert: HMDPSeckillDeadLetter
+        expr: increase(hmdp_seckill_operation_duration_seconds_count{operation="mysql_dlq_audit",outcome="manual_review"}[5m]) > 0
+        annotations:
+          summary: Seckill dead letter requires manual review
+      - alert: HMDPSeckillInventoryReview
+        expr: increase(hmdp_seckill_inventory_checks_total{status="manual_review"}[5m]) > 0
+        annotations:
+          summary: At least one inventory check requires manual review

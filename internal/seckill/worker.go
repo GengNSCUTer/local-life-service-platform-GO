@@ -38,8 +38,8 @@ func CreateTopics(ctx context.Context, client *kafka.Client) error {
 func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafka.Client, transport *kafka.Transport,
 	relayWorkers, consumerWorkers int) error {
 	var workers sync.WaitGroup
-	workers.Go(func() { s.expireReservations(ctx) })
-	workers.Go(func() { s.reconcileResolutions(ctx) })
+	workers.Go(func() { s.measuredWorker("expiration", func() { s.expireReservations(ctx) }) })
+	workers.Go(func() { s.measuredWorker("compensation", func() { s.reconcileResolutions(ctx) }) })
 	if !s.retry(ctx, "provision topics", func(operation context.Context) error {
 		return CreateTopics(operation, client)
 	}) {
@@ -59,21 +59,21 @@ func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafk
 	}
 	readers := make([]*kafka.Reader, 0, consumerWorkers)
 	for i := 0; i < relayWorkers; i++ {
-		workers.Go(func() { s.relay(ctx, writer) })
+		workers.Go(func() { s.measuredWorker("relay", func() { s.relay(ctx, writer) }) })
 	}
 	for i := 0; i < consumerWorkers; i++ {
 		reader := kafka.NewReader(kafka.ReaderConfig{
-			Brokers: brokers, Topic: orderTopic, GroupID: "hmdp-seckill-orders-v1",
+			Brokers: brokers, Topic: orderTopic, GroupID: orderGroup,
 			StartOffset: kafka.FirstOffset, MaxWait: 500 * time.Millisecond,
 		})
 		readers = append(readers, reader)
-		workers.Go(func() { s.consume(ctx, reader, writer) })
+		workers.Go(func() { s.measuredWorker("consumer", func() { s.consume(ctx, reader, writer) }) })
 	}
 	dlqReader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers: brokers, Topic: deadLetterTopic, GroupID: "hmdp-seckill-dlq-v1",
+		Brokers: brokers, Topic: deadLetterTopic, GroupID: dlqGroup,
 		StartOffset: kafka.FirstOffset, MaxWait: time.Second,
 	})
-	workers.Go(func() { s.reconcile(ctx, dlqReader) })
+	workers.Go(func() { s.measuredWorker("dlq", func() { s.reconcile(ctx, dlqReader) }) })
 	workers.Wait()
 	closeErrs := []error{dlqReader.Close(), writer.Close()}
 	for _, reader := range readers {
@@ -93,6 +93,7 @@ func (s *Service) relay(ctx context.Context, writer *kafka.Writer) {
 		case errors.Is(err, redis.Nil):
 			wait(ctx, 100*time.Millisecond)
 		default:
+			s.retryMetric("relay")
 			s.logger.Warn("seckill relay will retry", "error", err)
 			wait(ctx, time.Second)
 		}
@@ -111,7 +112,10 @@ func (s *Service) publishNext(ctx context.Context, writer *kafka.Writer) error {
 	if err != nil {
 		return fmt.Errorf("load outbox event %s: %w", id, err)
 	}
-	if err := writer.WriteMessages(ctx, kafka.Message{Topic: orderTopic, Key: []byte(id), Value: payload}); err != nil {
+	started := time.Now()
+	err = writer.WriteMessages(ctx, kafka.Message{Topic: orderTopic, Key: []byte(id), Value: payload})
+	s.observe(started, "kafka_publish", operationOutcome(err))
+	if err != nil {
 		return fmt.Errorf("publish order %s: %w", id, err)
 	}
 	// If the broker accepted the event but removal fails, a later claim republishes it.
@@ -129,6 +133,7 @@ func (s *Service) expireReservations(ctx context.Context) {
 		case errors.Is(err, redis.Nil):
 			wait(ctx, 100*time.Millisecond)
 		default:
+			s.retryMetric("expiration")
 			s.logger.Warn("seckill timeout worker will retry", "error", err)
 			wait(ctx, time.Second)
 		}
@@ -233,7 +238,16 @@ func (s *Service) processMessage(ctx context.Context, writer *kafka.Writer, mess
 	var event orderEvent
 	reason := reasonInvalidEvent
 	if err := json.Unmarshal(message.Value, &event); err == nil && event.valid(string(message.Key)) {
+		started := time.Now()
 		err := persistOrder(ctx, s.db, event)
+		outcome := operationOutcome(err)
+		switch {
+		case errors.Is(err, errOrderConflict):
+			outcome = reasonOrderConflict
+		case errors.Is(err, errInventoryMismatch):
+			outcome = reasonInventoryMismatch
+		}
+		s.observe(started, "mysql_persist", outcome)
 		switch {
 		case err == nil:
 			return s.finalize(ctx, event.ID)
@@ -246,12 +260,19 @@ func (s *Service) processMessage(ctx context.Context, writer *kafka.Writer, mess
 		}
 	}
 	// Offset commit waits for Kafka to confirm that the dead-letter record exists.
-	return writer.WriteMessages(ctx, kafka.Message{
+	started := time.Now()
+	err := writer.WriteMessages(ctx, kafka.Message{
 		Topic:   deadLetterTopic,
 		Key:     []byte(fmt.Sprintf("%s/%d/%d", message.Topic, message.Partition, message.Offset)),
 		Value:   message.Value,
 		Headers: []kafka.Header{{Key: "reason", Value: []byte(reason)}},
 	})
+	outcome := reason
+	if err != nil {
+		outcome = "error"
+	}
+	s.observe(started, "kafka_dlq_publish", outcome)
+	return err
 }
 
 func (s *Service) reconcile(ctx context.Context, reader *kafka.Reader) {
@@ -298,7 +319,13 @@ func (s *Service) reconcileDeadLetter(ctx context.Context, message kafka.Message
 			return err
 		}
 	}
-	return s.recordDeadLetter(ctx, message, event, reason, outcome)
+	started := time.Now()
+	err := s.recordDeadLetter(ctx, message, event, reason, outcome)
+	if err != nil {
+		outcome = "error"
+	}
+	s.observe(started, "mysql_dlq_audit", outcome)
+	return err
 }
 
 func (s *Service) resolveDeadLetterOrder(ctx context.Context, event orderEvent, reason string) (string, error) {
@@ -363,6 +390,7 @@ func (s *Service) retry(ctx context.Context, name string, run func(context.Conte
 		if err == nil {
 			return true
 		}
+		s.retryMetric(name)
 		s.logger.Warn("seckill consumer will retry", "operation", name, "error", err)
 		if !wait(ctx, delay) {
 			return false

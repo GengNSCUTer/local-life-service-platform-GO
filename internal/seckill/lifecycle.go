@@ -100,7 +100,9 @@ func retryableTransaction(err error) bool {
 	return errors.As(err, &mysqlErr) && (mysqlErr.Number == 1062 || mysqlErr.Number == 1205 || mysqlErr.Number == 1213)
 }
 
-func (s *Service) syncResolution(ctx context.Context, event orderEvent) (string, error) {
+func (s *Service) syncResolution(ctx context.Context, event orderEvent) (reason string, syncErr error) {
+	started := time.Now()
+	defer func() { s.observe(started, "compensation", operationOutcome(syncErr)) }()
 	var state struct {
 		Reason      string
 		RedisSynced bool
