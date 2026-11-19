@@ -1,27 +1,41 @@
 # Local Life Service Platform Go
 
-这是本地生活服务平台的 Go 重构版本。
+这是本地生活服务平台的 Go 重构项目。Java 版提供业务和 API 参考，Go 版从模块化单体起步。秒杀阶段将用 Redis Lua 做资格校验和库存预占，用 Kafka 投递订单事件，由消费者在 MySQL 事务中落单。
 
-项目以同级目录中的 Java 项目 `../` 作为业务基线。Java 版本已经覆盖短信登录、商户缓存、优惠券秒杀、Redis Stream 异步下单、关注 Feed、附近商户和签到等场景。Go 版本会保留业务语义和主要 HTTP API，同时结合 Go 的并发模型、显式依赖管理和服务生命周期重新设计实现。
+## 运行开发环境
 
-## 当前阶段
+准备 Go 1.27.1 或更新版本和可访问 Docker daemon 的 Docker Compose。从仓库根目录启动本地环境和 API。
 
-当前先完成业务与技术架构梳理，文档位于 `docs/`。下一阶段会初始化 Go 模块、配置本地基础设施，并实现可运行的健康检查服务。
+```bash
+cp .env.example .env
+set -a
+. ./.env
+set +a
+docker compose up -d --wait
+go run ./cmd/api
+```
 
-## 技术路线
+Compose 启动本地 MySQL、Redis、单节点 Kafka。默认只绑定本机，端口分别为 `23306`、`26379`、`29092`。MySQL 初始化 `hmdp` 空库，业务表和 Kafka Topic 会随秒杀模块引入。API 从进程环境变量读取配置，API 与 Compose 可以共用 `.env.example` 中的设置。连接独立服务时，可覆盖 `MYSQL_ADDR`、`REDIS_ADDR` 和逗号分隔的 `KAFKA_BROKERS`。
 
-- HTTP：Gin
-- ORM：GORM
-- Redis：go-redis
-- 消息队列：Kafka，客户端先采用 `segmentio/kafka-go`
-- 关系数据库：MySQL
-- 本地基础设施：Docker Compose
-- 后续观测：Prometheus、Grafana、OpenTelemetry
+## 验证 API
 
-## 目录
+```bash
+curl -i http://127.0.0.1:8080/health/live
+curl -i http://127.0.0.1:8080/health/ready
+go test ./...
+go vet ./...
+```
 
-- `docs/`：业务地图、架构设计、组件职责和秒杀设计
-- `cmd/`：可执行程序入口，后续创建
-- `internal/`：按业务领域组织的应用代码，后续创建
-- `migrations/`：数据库迁移和兼容性变更，后续创建
-- `deploy/`：本地基础设施配置，后续创建
+- `/health/live` 在 HTTP 进程可响应时返回 `200`，可先单独运行 API 来验证启动链路。
+- `/health/ready` 并行检查 MySQL Ping、Redis Ping 和 Kafka Broker 元数据。依赖全部可用时返回 `200`，有依赖不可用时返回 `503`，并在 `data.checks` 中标出对应组件。
+- `Ctrl+C` 或 `SIGTERM` 会让 API 停止接收新连接，给正在处理的请求最多 10 秒完成，然后关闭客户端。
+- `docker compose down` 停止本地中间件并保留数据卷。
+
+本阶段通过了 `go test -race ./...`、`go vet ./...` 和 Compose 配置检查。使用独立的 MySQL 8.0.33、Redis 7.2.11 和 Kafka 4.1.2 验证了依赖全部就绪、Redis 停机与恢复、API 收到 `SIGTERM` 后退出。当前环境的 Docker daemon 访问权限限制了 Compose 实际启动验证。
+
+## 从哪里读代码
+
+- [`cmd/api/main.go`](cmd/api/main.go) 读取环境配置，监听进程信号并启动应用。
+- [`internal/app`](internal/app) 显式组装 GORM、go-redis、kafka-go 和 HTTP 服务。后续在这里注册各业务模块。
+- [`internal/platform/httpx`](internal/platform/httpx) 管理 JSON 响应、请求 ID、访问日志和 panic 恢复。
+- [`docs/`](docs) 记录业务地图、模块架构和秒杀设计。
