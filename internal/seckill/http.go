@@ -10,10 +10,10 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/platform/httpx"
+	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/user"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
@@ -31,8 +31,8 @@ func New(db *gorm.DB, cache *redis.Client, logger *slog.Logger) *Service {
 	return &Service{db: db, redis: cache, logger: logger}
 }
 
-func (s *Service) Register(router *gin.Engine) {
-	orders := router.Group("/voucher-order")
+func (s *Service) Register(router *gin.Engine, requireLogin gin.HandlerFunc) {
+	orders := router.Group("/voucher-order", requireLogin)
 	orders.POST("/seckill/:id", s.submit)
 	orders.GET("/:id", s.status)
 }
@@ -46,10 +46,7 @@ func (s *Service) submit(c *gin.Context) {
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
-	userID, ok := s.sessionUser(ctx, c)
-	if !ok {
-		return
-	}
+	userID, _ := user.CurrentID(ctx)
 	event := orderEvent{Version: 1, ID: rand.Text(), VoucherID: voucherID, UserID: userID, CreatedAt: time.Now().UTC()}
 	payload, err := json.Marshal(event)
 	if err != nil {
@@ -92,10 +89,7 @@ func (s *Service) status(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
-	userID, ok := s.sessionUser(ctx, c)
-	if !ok {
-		return
-	}
+	userID, _ := user.CurrentID(ctx)
 
 	var order Order
 	err := s.db.WithContext(ctx).Table("seckill_orders").Take(&order, "id = ?", id).Error
@@ -129,25 +123,6 @@ func (s *Service) status(c *gin.Context) {
 	default:
 		s.unavailable(c, "look up order", err)
 	}
-}
-
-func (s *Service) sessionUser(ctx context.Context, c *gin.Context) (uint64, bool) {
-	token := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
-	if token == "" || len(token) > 256 {
-		httpx.Respond(c, http.StatusUnauthorized, "valid session required", nil)
-		return 0, false
-	}
-	value, err := s.redis.HGet(ctx, "login:token:"+token, "id").Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		s.unavailable(c, "read session", err)
-		return 0, false
-	}
-	id, err := strconv.ParseUint(value, 10, 64)
-	if err != nil || id == 0 {
-		httpx.Respond(c, http.StatusUnauthorized, "valid session required", nil)
-		return 0, false
-	}
-	return id, true
 }
 
 func (s *Service) unavailable(c *gin.Context, operation string, err error) {

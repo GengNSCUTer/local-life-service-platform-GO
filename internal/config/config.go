@@ -9,6 +9,7 @@ import (
 
 type Config struct {
 	HTTPAddr             string
+	AuthDevLogCodes      bool
 	MySQLAddr            string
 	MySQLUser            string
 	MySQLPassword        string
@@ -36,8 +37,10 @@ func Load() Config {
 		}
 	}
 
+	authDevLogCodes, _ := strconv.ParseBool(env("AUTH_DEV_LOG_CODES", "false"))
 	return Config{
 		HTTPAddr:             env("HTTP_ADDR", "127.0.0.1:8080"),
+		AuthDevLogCodes:      authDevLogCodes,
 		MySQLAddr:            env("MYSQL_ADDR", localAddr("MYSQL_PORT", "23306")),
 		MySQLUser:            env("MYSQL_USER", "hmdp"),
 		MySQLPassword:        env("MYSQL_PASSWORD", "hmdp_dev_mysql"),

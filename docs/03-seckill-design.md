@@ -16,7 +16,7 @@ flowchart LR
 
 ## HTTP 接口
 
-两个接口通过 `Authorization` 读取 `login:token:{token}` 中的用户 ID，支持原始 token 或 `Bearer <token>`。正式登录接口将在用户模块实现，本地联调可用带 TTL 的测试会话。
+两个接口共用用户模块的鉴权中间件，支持 `Authorization` 携带原始 Token 或 `Bearer <token>`。可以用[验证码登录](07-user-authentication.md)取得 Token，也可以在隔离的本地环境使用预置测试会话。
 
 | 方法和路径 | 行为 |
 | --- | --- |
@@ -41,6 +41,7 @@ flowchart LR
 ```bash
 docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/001_seckill.sql
 docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/002_seckill_dead_letters.sql
+docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/003_user.sql
 
 go run ./cmd/api prepare-seckill -voucher-id 42 -stock 10 \
   -starts-at "$(date -u -d '+30 seconds' +%FT%TZ)" \

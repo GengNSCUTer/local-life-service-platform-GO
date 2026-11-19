@@ -17,7 +17,7 @@ go run ./cmd/api
 
 Compose 启动本地 MySQL、Redis 主节点、Redis 副本、三个 Redis Sentinel 和单节点 Kafka。默认只绑定本机，主节点端口为 `26379`，Sentinel 端口为 `26380`、`26381`、`26382`，其他端口分别为 `23306` 和 `29092`。MySQL 初始化 `hmdp` 空库。API 从进程环境变量读取配置，API 与 Compose 可以共用 `.env.example` 中的设置。连接独立服务时，可覆盖 `MYSQL_ADDR`、`REDIS_ADDR`、`REDIS_SENTINEL_ADDRS` 和逗号分隔的 `KAFKA_BROKERS`。
 
-按[秒杀联调步骤](docs/03-seckill-design.md#本地体验)执行两份 SQL 迁移、准备活动并体验抢券与订单查询。
+按[秒杀联调步骤](docs/03-seckill-design.md#本地体验)应用 SQL 迁移并准备活动。[用户登录与鉴权](docs/07-user-authentication.md)提供验证码登录、跨实例会话与真实 Token 抢券的联调步骤。
 
 百万和千万请求的复现命令与测量口径见[秒杀接口压测](docs/04-seckill-benchmark.md)。
 
@@ -47,5 +47,6 @@ scripts/seckill-compensation-smoke.sh
 
 - [`cmd/api/main.go`](cmd/api/main.go) 读取环境配置，监听进程信号并启动应用。
 - [`internal/app`](internal/app) 显式组装 GORM、go-redis、kafka-go 和 HTTP 服务。后续在这里注册各业务模块。
+- [`internal/user`](internal/user) 实现验证码、用户注册、会话和共用的鉴权中间件。
 - [`internal/platform/httpx`](internal/platform/httpx) 管理 JSON 响应、请求 ID、访问日志和 panic 恢复。
 - [`docs/`](docs) 记录业务地图、模块架构和秒杀设计。
