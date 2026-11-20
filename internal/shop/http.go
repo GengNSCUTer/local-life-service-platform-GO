@@ -93,6 +93,10 @@ func (s *Service) listByType(c *gin.Context) {
 	x, hasX := c.GetQuery("x")
 	y, hasY := c.GetQuery("y")
 	if hasX || hasY {
+		if _, cursor := c.GetQuery("afterId"); cursor {
+			httpx.Respond(c, http.StatusBadRequest, "nearby shops use current", nil)
+			return
+		}
 		s.nearby(c, typeID, x, y)
 		return
 	}
@@ -108,20 +112,49 @@ func (s *Service) listByName(c *gin.Context) {
 	s.list(c, 0, name, 10)
 }
 
+type shopPage struct {
+	List        []shopRecord `json:"list"`
+	NextAfterID string       `json:"nextAfterId,omitempty"`
+}
+
 func (s *Service) list(c *gin.Context, typeID uint64, name string, size int) {
-	page, err := strconv.Atoi(c.DefaultQuery("current", "1"))
-	if err != nil || page < 1 || page > 10000 {
-		httpx.Respond(c, http.StatusBadRequest, "page must be between 1 and 10000", nil)
-		return
+	cursor, cursorMode := c.GetQuery("afterId")
+	var afterID uint64
+	var offset int
+	limit := size
+	if cursorMode {
+		id, err := strconv.ParseUint(cursor, 10, 64)
+		if _, hasCurrent := c.GetQuery("current"); hasCurrent || err != nil {
+			httpx.Respond(c, http.StatusBadRequest, "use a valid afterId or current", nil)
+			return
+		}
+		afterID = id
+		limit++
+	} else {
+		page, err := strconv.Atoi(c.DefaultQuery("current", "1"))
+		if err != nil || page < 1 || page > 10000 {
+			httpx.Respond(c, http.StatusBadRequest, "page must be between 1 and 10000", nil)
+			return
+		}
+		offset = (page - 1) * size
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), requestTimeout)
 	defer cancel()
-	items, err := s.shops.list(ctx, typeID, name, page, size)
+	items, err := s.shops.list(ctx, typeID, name, offset, limit, afterID)
 	if err != nil {
 		s.respondError(c, "list shops", err)
 		return
 	}
-	httpx.Respond(c, http.StatusOK, "", items)
+	if !cursorMode {
+		httpx.Respond(c, http.StatusOK, "", items)
+		return
+	}
+	result := shopPage{List: items}
+	if len(items) > size {
+		result.List = items[:size]
+		result.NextAfterID = strconv.FormatUint(items[size-1].ID, 10)
+	}
+	httpx.Respond(c, http.StatusOK, "", result)
 }
 
 func bindShopWrite(c *gin.Context) (shopWriteRequest, bool) {

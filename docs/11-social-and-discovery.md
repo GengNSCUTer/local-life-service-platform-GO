@@ -18,6 +18,8 @@
 | `GET /shop/of/type?typeId=1&x=120.1&y=30.2&current=1` | 5 公里内同类型店铺，按距离升序，每页 5 家，`distance` 单位为米 |
 | `POST /user/sign`、`GET /user/sign/count` | 登录后签到和查询截至当天的本月连续签到天数，按北京时间划日 |
 
+热门博客默认使用 `current` 并返回数组。传 `cursor=0` 可从首页进入游标模式，响应包含 `list` 和可选的 `nextCursor`。游标由本页末尾的点赞数和博客 ID 组成，下一页仍按两者降序读取。排名随点赞实时变化，跨页期间的排名变动可能让个别博客重复或跳过。
+
 关注动态保留 `list`、`minTime` 和 `offset` 响应字段。`minTime` 在 Go 版是本页最后一条博客 ID，可作为旧客户端下一页的 `lastId`，`offset` 固定为 0。
 
 ## 从源码读一次请求
@@ -25,8 +27,8 @@
 1. `changeLike` 在 GORM 事务中锁住博客行，读取当前用户是否点赞，再决定是否更新关系与点赞数。重复发送目标状态时，两者保持一致。 [博客实现](../internal/social/blog.go)
 2. `feed` 把关注关系和博客联表查询，以 `b.id < cursor` 读取下一页。两条博客即使在同一秒发布，也能通过不同的 ID 确定顺序。请求下一页期间新发布的博客会出现在刷新后的第一页。 [动态接口](../internal/social/http.go)
 3. `commonFollows` 使用 Redis Set 求交集。MySQL 事务更新关注关系和缓存版本，后续请求读取新版本。缓存缺失时重建，Redis 失败时通过 MySQL 联表查询。 [关注实现](../internal/social/follow.go)
-4. 发布博客和写 Outbox 同时提交。Relay 收到 Kafka 确认后删除 Outbox，消费者分页获取当时的关注者，把博客 ID 写入各自的 Redis Sorted Set。重新收到同一事件时，同一个成员只保留一份。查通知时核对当前关注关系。 [通知 Worker](../internal/social/notifications.go)
-5. 附近查询用 `GEOSEARCH` 查 ID 和距离，然后批量查 MySQL 补齐详情。店铺创建、坐标修改与分类变更会在同一 MySQL 事务里更新索引版本，下一次查询按需重建。 [附近店铺](../internal/shop/geo.go)
+4. 发布博客和写 Outbox 同时提交。Relay 收到 Kafka 确认后删除 Outbox，消费者按用户 ID 每批查 512 位关注者，通过 Redis pipeline 执行 Lua。每位用户的入队、裁剪和续期在一次 Lua 调用里完成。重新收到同一事件时，同一个成员只保留一份。查通知时核对当前关注关系。 [通知 Worker](../internal/social/notifications.go)
+5. 附近查询用 `GEOSEARCH` 查 ID 和距离，然后批量查 MySQL 补齐详情。店铺创建、坐标修改与分类变更会在同一 MySQL 事务里更新索引版本，下一次查询按需重建。多个 API 共享同分类、同版本的 Redis 短租约。提交索引时用 Lua 核对租约持有者，其他请求在自己的 `Context` 截止时间内等就绪。 [附近店铺](../internal/shop/geo.go)
 6. 签到将本月第 `day - 1` 位设为 1。读取本月截至当天的位段后，从最后一位开始数连续的 1。当天重复签到只会设置同一位，跨月从新 Bitmap 开始。 [签到实现](../internal/user/sign.go)
 
 ## 联调

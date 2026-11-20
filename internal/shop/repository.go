@@ -56,18 +56,23 @@ func (r repository) types(ctx context.Context) ([]shopType, error) {
 	return items, err
 }
 
-func (r repository) list(ctx context.Context, typeID uint64, name string, page, size int) ([]shopRecord, error) {
+func (r repository) list(ctx context.Context, typeID uint64, name string, offset, size int, afterID uint64) ([]shopRecord, error) {
 	items := make([]shopRecord, 0)
 	query := r.db.WithContext(ctx).Table(shopTable)
 	if typeID > 0 {
 		query = query.Where("type_id = ?", typeID)
+	}
+	if afterID != 0 {
+		query = query.Where("id > ?", afterID)
 	}
 	if name != "" {
 		// Escape LIKE metacharacters so the search matches a literal substring.
 		pattern := strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(name)
 		query = query.Where("name LIKE ? ESCAPE '!'", "%"+pattern+"%")
 	}
-	err := query.Order("id ASC").Offset((page - 1) * size).Limit(size).Find(&items).Error
+	page := query.Select("id").Order("id ASC").Offset(offset).Limit(size)
+	err := r.db.WithContext(ctx).Table(shopTable+" AS s").Select("s.*").
+		Joins("JOIN (?) page ON page.id = s.id", page).Order("page.id ASC").Find(&items).Error
 	return items, err
 }
 

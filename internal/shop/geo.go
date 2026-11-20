@@ -2,6 +2,7 @@ package shop
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"math"
 	"net/http"
@@ -86,40 +87,90 @@ func (s *Service) findNearby(ctx context.Context, kind uint64, x, y float64, pag
 	return items, nil
 }
 
+// The index, readiness marker and lease share the category's Redis hash tag.
+var claimGeoBuild = redis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 1 then return 2 end
+if redis.call('SET', KEYS[2], ARGV[1], 'NX', 'PX', ARGV[2]) then return 1 end
+return 0
+`)
+
+var finishGeoBuild = redis.NewScript(`
+if redis.call('GET', KEYS[3]) ~= ARGV[1] then return 0 end
+redis.call('DEL', KEYS[1])
+-- Bound the size of each GEOADD argument list even for large categories.
+for first = 4, #ARGV, 600 do
+    redis.call('GEOADD', KEYS[1], unpack(ARGV, first, math.min(first + 599, #ARGV)))
+end
+redis.call('PEXPIRE', KEYS[1], ARGV[3])
+redis.call('SET', KEYS[2], '1', 'PX', ARGV[2])
+redis.call('DEL', KEYS[3])
+return 1
+`)
+
+var releaseGeoBuild = redis.NewScript(`
+if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
+return 0
+`)
+
 func (s *Service) geoIndex(ctx context.Context, kind uint64) (string, error) {
 	var revision uint64
 	if err := s.shops.db.WithContext(ctx).Raw("SELECT COALESCE(MAX(revision), 0) FROM shop_geo_versions WHERE type_id = ?", kind).Scan(&revision).Error; err != nil {
 		return "", err
 	}
 	key := fmt.Sprintf("shop:geo:{%d}:%d", kind, revision)
-	ready := key + ":ready"
+	ready, lease := key+":ready", key+":build"
 	present, err := s.cache.Exists(ctx, ready).Result()
 	if err != nil || present > 0 {
 		return key, err
 	}
+	token := rand.Text()
+	for {
+		state, err := claimGeoBuild.Run(ctx, s.cache, []string{ready, lease}, token, (2 * time.Second).Milliseconds()).Int()
+		if err != nil || state == 2 {
+			return key, err
+		}
+		if state == 1 {
+			built, err := s.buildGeoIndex(ctx, kind, key, ready, lease, token)
+			if err != nil || built {
+				return key, err
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
+func (s *Service) buildGeoIndex(ctx context.Context, kind uint64, key, ready, lease, token string) (bool, error) {
 	var rows []struct {
 		ID   uint64
 		X, Y float64
 	}
 	if err := s.shops.db.WithContext(ctx).Table(shopTable).Select("id, x, y").Where("type_id = ?", kind).Find(&rows).Error; err != nil {
-		return "", err
+		s.releaseGeoLease(ctx, lease, token)
+		return false, err
 	}
-	locations := make([]*redis.GeoLocation, 0, len(rows))
+	const ttl = 5 * time.Minute
+	args := make([]any, 0, 3+len(rows)*3)
+	args = append(args, token, ttl.Milliseconds(), (ttl + time.Second).Milliseconds())
 	for _, row := range rows {
 		if validGeo(row.X, row.Y) {
-			locations = append(locations, &redis.GeoLocation{Name: strconv.FormatUint(row.ID, 10), Longitude: row.X, Latitude: row.Y})
+			args = append(args, row.X, row.Y, strconv.FormatUint(row.ID, 10))
 		}
 	}
-	_, err = s.cache.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-		pipe.Del(ctx, key)
-		if len(locations) > 0 {
-			pipe.GeoAdd(ctx, key, locations...)
-			pipe.Expire(ctx, key, 5*time.Minute+time.Second)
-		}
-		pipe.Set(ctx, ready, "1", 5*time.Minute)
-		return nil
-	})
-	return key, err
+	built, err := finishGeoBuild.Run(ctx, s.cache, []string{key, ready, lease}, args...).Int()
+	if err != nil {
+		s.releaseGeoLease(ctx, lease, token)
+	}
+	return built == 1, err
+}
+
+func (s *Service) releaseGeoLease(ctx context.Context, lease, token string) {
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 100*time.Millisecond)
+	defer cancel()
+	_ = releaseGeoBuild.Run(cleanup, s.cache, []string{lease}, token).Err()
 }
 
 func bumpGeo(tx *gorm.DB, kind uint64) error {

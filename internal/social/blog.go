@@ -47,9 +47,10 @@ type Blog struct {
 
 type blogView struct {
 	Blog
-	Name   string `json:"name"`
-	Icon   string `json:"icon"`
-	IsLike bool   `json:"isLike"`
+	Name      string  `json:"name"`
+	Icon      string  `json:"icon"`
+	IsLike    bool    `json:"isLike"`
+	RankLiked *uint32 `json:"-" gorm:"column:rank_liked"`
 }
 
 type profile struct {
@@ -76,9 +77,11 @@ func (s *Service) publish(ctx context.Context, author uint64, input blogInput) (
 	return item.ID, err
 }
 
+const blogViewColumns = "b.id, b.shop_id, b.user_id, b.title, b.images, b.content, COALESCE(b.liked, 0) AS liked, COALESCE(b.comments, 0) AS comments, b.create_time, COALESCE(u.nick_name, '') AS name, COALESCE(u.icon, '') AS icon, (l.user_id IS NOT NULL) AS is_like"
+
 func (s *Service) blogs(ctx context.Context, viewer uint64) *gorm.DB {
 	return s.db.WithContext(ctx).Table("tb_blog AS b").
-		Select("b.id, b.shop_id, b.user_id, b.title, b.images, b.content, COALESCE(b.liked, 0) AS liked, COALESCE(b.comments, 0) AS comments, b.create_time, COALESCE(u.nick_name, '') AS name, COALESCE(u.icon, '') AS icon, (l.user_id IS NOT NULL) AS is_like").
+		Select(blogViewColumns).
 		Joins("LEFT JOIN tb_user u ON u.id = b.user_id").
 		Joins("LEFT JOIN social_blog_likes l ON l.blog_id = b.id AND l.user_id = ?", viewer)
 }

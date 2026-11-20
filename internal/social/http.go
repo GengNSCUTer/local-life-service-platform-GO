@@ -18,7 +18,7 @@ func (s *Service) Register(router *gin.Engine, login, optionalLogin gin.HandlerF
 	blogs := router.Group("/blog")
 	blogs.POST("", login, s.create)
 	blogs.GET("/:id", optionalLogin, s.detail)
-	blogs.GET("/hot", optionalLogin, s.list)
+	blogs.GET("/hot", optionalLogin, s.hot)
 	blogs.GET("/of/user", optionalLogin, s.list)
 	blogs.GET("/of/me", login, s.list)
 	blogs.GET("/of/follow", login, s.feed)
@@ -105,8 +105,6 @@ func (s *Service) list(c *gin.Context) {
 		query = query.Where("b.user_id = ?", id)
 	case "/blog/of/me":
 		query = query.Where("b.user_id = ?", viewer)
-	case "/blog/hot":
-		query = query.Order("b.liked DESC")
 	}
 	items := make([]blogView, 0)
 	err = query.Order("b.id DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error

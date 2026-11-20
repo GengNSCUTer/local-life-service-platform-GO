@@ -21,7 +21,8 @@ SQL
     [[ "$dataset" == $'100000\t10000\t10\t1000000\t1000000\n0\t0\t0' ]]
     curl -fsS --max-time 5 -X POST "http://$HTTP_ADDR/user/code?phone=19900000002" > /dev/null
     code=$("${redis[@]}" HGET 'login:code:{19900000002}' code)
-    python3 scripts/catalog-load.py smoke --ports "$port" --code "$code" | tee "$work/catalog-smoke.log"
+    python3 scripts/catalog_load.py smoke --ports "$port" --code "$code" | tee "$work/catalog-smoke.log"
+    python3 scripts/catalog_load.py pagination --ports "$port" | tee "$work/catalog-pagination.log"
     [[ $("${mysql[@]}" -BN "$MYSQL_DATABASE" -e 'SELECT COUNT(*) FROM tb_user') == 100000 ]]
     "${mysql[@]}" --batch --raw --skip-column-names "$MYSQL_DATABASE" < scripts/catalog-plans.sql > "$work/catalog-explain.txt"
 
@@ -32,6 +33,7 @@ SQL
             HTTP_ADDR="127.0.0.1:$((port+8))" KAFKA_BROKERS= OBSERVABILITY_ADDR="127.0.0.1:$((port+9))" \
                 "$work/api" > "$work/api-second.log" 2>&1 & second_pid=$!
             wait_ready "127.0.0.1:$((port+8))"
+            verify_geo_build "${ports[@]}"
         fi
         for traffic in uniform hot; do
             for cache in cold warm; do
@@ -42,11 +44,11 @@ SQL
                 "${redis[@]}" --scan --pattern 'shop:geo:*' >> "$keys"
                 xargs -r -n 500 "${redis[@]}" UNLINK < "$keys" > /dev/null
                 if [[ "$cache" == warm ]]; then
-                    python3 scripts/catalog-load.py warm --ports "${ports[@]}" --clients "$clients"
+                    python3 scripts/catalog_load.py warm --ports "${ports[@]}" --clients "$clients"
                 fi
                 catalog_snapshot "$name-before" "$api_count"
                 printf 'Running %s with %s clients for %ss\n' "$name" "$clients" "$seconds"
-                if ! python3 scripts/catalog-load.py measure --ports "${ports[@]}" --clients "$clients" \
+                if ! python3 scripts/catalog_load.py measure --ports "${ports[@]}" --clients "$clients" \
                     --seconds "$seconds" --traffic "$traffic" --scenario "$name" | tee -a "$work/catalog-results.jsonl"; then
                     result=1
                 fi
@@ -55,6 +57,8 @@ SQL
         done
     done
     rm -f -- "$keys"
+    run_social_fanout
+    run_name_search_comparison
     return "$result"
 }
 
@@ -69,4 +73,35 @@ catalog_snapshot() {
     if [[ "$api_count" == 2 ]]; then
         curl -fsS --max-time 5 "http://127.0.0.1:$((port+9))/metrics" > "$work/$name.second.prom"
     fi
+}
+
+verify_geo_build() {
+    local key='shop:geo:{1}:0' before after
+    "${redis[@]}" DEL "$key" "$key:ready" > /dev/null
+    # Emulate an expired builder lease while 32 requests enter two API processes.
+    "${redis[@]}" SET "$key:build" expired-builder PX 300 > /dev/null
+    before=$(catalog_geoadds)
+    python3 scripts/catalog_load.py geo-burst --ports "$@" --clients 32 | tee "$work/catalog-geo-build.json"
+    after=$(catalog_geoadds)
+    [[ $((after-before)) == 5 && $("${redis[@]}" ZCARD "$key") == 1000 ]]
+    [[ $("${redis[@]}" EXISTS "$key:build") == 0 && $("${redis[@]}" GET "$key:ready") == 1 ]]
+    printf 'PASS 32 requests, two API processes, one GEO rebuild (five GEOADD chunks)\n' | tee "$work/catalog-geo-build.log"
+}
+
+catalog_geoadds() {
+    "${redis[@]}" INFO commandstats | awk -F '[=,]' '/^cmdstat_geoadd:/ {n=$2} END {print n+0}'
+}
+
+run_social_fanout() {
+    "${mysql[@]}" -BN "$MYSQL_DATABASE" -e 'INSERT IGNORE INTO social_follows (user_id, follow_user_id) SELECT id, 2 FROM tb_user WHERE id <> 2'
+    [[ $("${mysql[@]}" -BN "$MYSQL_DATABASE" -e 'SELECT COUNT(*) FROM social_follows WHERE follow_user_id=2') == 99999 ]]
+    "${redis[@]}" HSET login:token:catalog-100000 id 100000 > /dev/null
+    "${redis[@]}" EXPIRE login:token:catalog-100000 1800 > /dev/null
+    python3 scripts/catalog-fanout.py "$port" | tee "$work/catalog-fanout.json"
+    [[ $("${redis[@]}" --scan --pattern 'social:notifications:*' | wc -l) == 99999 ]]
+    [[ $("${mysql[@]}" -BN "$MYSQL_DATABASE" -e 'SELECT COUNT(*) FROM social_blog_outbox') == 0 ]]
+}
+
+run_name_search_comparison() {
+    "${mysql[@]}" --batch --raw "$MYSQL_DATABASE" < scripts/catalog-search.sql > "$work/catalog-search.txt"
 }

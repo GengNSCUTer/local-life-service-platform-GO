@@ -67,6 +67,48 @@ def smoke(args):
         with_connection.close()
 
 
+def pagination(args):
+    connection = http.client.HTTPConnection(*addresses(args)[0], timeout=5)
+    try:
+        for path, cursor, next_key in (
+            ("/blog/hot", "cursor", "nextCursor"),
+            ("/shop/of/type?typeId=1", "afterId", "nextAfterId"),
+            ("/shop/of/name?name=Catalog%20Shop", "afterId", "nextAfterId"),
+        ):
+            join = "&" if "?" in path else "?"
+            first = request(connection, f"{path}{join}{cursor}=0")
+            second = request(connection, f"{path}{join}{cursor}={first[next_key]}")
+            assert first["list"] == request(connection, f"{path}{join}current=1"), path
+            assert second["list"] == request(connection, f"{path}{join}current=2"), path
+            assert not ({row["id"] for row in first["list"]} & {row["id"] for row in second["list"]}), path
+        legacy = request(connection, "/blog/hot?current=1000")
+        prior = request(connection, "/blog/hot?current=999")[-1]
+        deep = request(connection, f"/blog/hot?cursor={prior['liked']}:{prior['id']}")
+        assert legacy == deep["list"] and len(legacy) == 10
+        assert request(connection, "/shop/of/type?typeId=1&afterId=9991") == {"list": []}
+        assert request(connection, "/shop/of/name?name=09999&afterId=0")["list"][0]["id"] == 9999
+        print("PASS legacy and cursor pages match, including deep hot blog page")
+    finally:
+        connection.close()
+
+
+def geo_burst(args):
+    targets = addresses(args)
+
+    def load(worker):
+        connection = http.client.HTTPConnection(*targets[worker % len(targets)], timeout=5)
+        try:
+            started = time.monotonic()
+            rows = request(connection, nearby(1, 0, 1))
+            assert len(rows) == 5
+            return (time.monotonic() - started) * 1000
+        finally:
+            connection.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.clients) as pool:
+        print(json.dumps({"requests": args.clients, **latency(list(pool.map(load, range(args.clients))))}))
+
+
 def warm(args):
     # Prewarm the entire detail keyspace and every GEO category through the real API.
     targets = addresses(args)
@@ -169,7 +211,7 @@ def measure(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("smoke", "warm", "measure"))
+    parser.add_argument("mode", choices=("smoke", "pagination", "geo-burst", "warm", "measure"))
     parser.add_argument("--ports", type=int, nargs="+", required=True)
     parser.add_argument("--clients", type=int, default=16)
     parser.add_argument("--seconds", type=float, default=60)
@@ -179,4 +221,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.clients < 1 or not math.isfinite(args.seconds) or args.seconds <= 0:
         parser.error("clients and seconds must be positive")
-    {"smoke": smoke, "warm": warm, "measure": measure}[args.mode](args)
+    {"smoke": smoke, "pagination": pagination, "geo-burst": geo_burst, "warm": warm, "measure": measure}[args.mode](args)

@@ -125,8 +125,19 @@ func notificationKey(userID uint64) string {
 	return "social:notifications:" + strconv.FormatUint(userID, 10)
 }
 
+// Apply each follower's update atomically so a partial pipeline can be retried.
+var storeNotification = redis.NewScript(`
+redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
+redis.call('ZREMRANGEBYRANK', KEYS[1], 0, -101)
+redis.call('EXPIRE', KEYS[1], ARGV[3])
+return 1
+`)
+
 func (s *Service) notifyFollowers(ctx context.Context, event publishedBlog) error {
-	const batchSize = 128
+	const batchSize = 512
+	const ttlSeconds = 30 * 24 * 60 * 60
+	blogID := strconv.FormatUint(event.BlogID, 10)
+	publishedAt := event.CreatedAt.UnixMilli()
 	var last uint64
 	for ctx.Err() == nil {
 		operation, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -136,10 +147,7 @@ func (s *Service) notifyFollowers(ctx context.Context, event publishedBlog) erro
 		if err == nil && len(followers) != 0 {
 			_, err = s.cache.Pipelined(operation, func(pipe redis.Pipeliner) error {
 				for _, id := range followers {
-					key := notificationKey(id)
-					pipe.ZAdd(operation, key, redis.Z{Score: float64(event.CreatedAt.UnixMilli()), Member: strconv.FormatUint(event.BlogID, 10)})
-					pipe.ZRemRangeByRank(operation, key, 0, -101)
-					pipe.Expire(operation, key, 30*24*time.Hour)
+					storeNotification.Eval(operation, pipe, []string{notificationKey(id)}, publishedAt, blogID, ttlSeconds)
 				}
 				return nil
 			})
