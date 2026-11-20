@@ -51,12 +51,30 @@ func (s *Service) findNearby(ctx context.Context, kind uint64, x, y float64, pag
 		return nil, err
 	}
 	const size = 5
-	locations, err := s.cache.GeoSearchLocation(ctx, key, &redis.GeoSearchLocationQuery{
+	query := &redis.GeoSearchLocationQuery{
 		GeoSearchQuery: redis.GeoSearchQuery{Longitude: x, Latitude: y, Radius: 5000, RadiusUnit: "m", Sort: "ASC", Count: page * size},
 		WithDist:       true,
-	}).Result()
+	}
+	locations, err := s.cache.GeoSearchLocation(ctx, key, query).Result()
 	if err != nil {
 		return nil, err
+	}
+	if len(locations) == 0 {
+		// The ZSET can be evicted independently of its marker after geoIndex returns.
+		ready, err := geoReady.Run(ctx, s.cache, []string{key, key + ":ready"}).Int()
+		if err != nil {
+			return nil, err
+		}
+		if ready == 0 {
+			key, err = s.geoIndex(ctx, kind)
+			if err != nil {
+				return nil, err
+			}
+			locations, err = s.cache.GeoSearchLocation(ctx, key, query).Result()
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 	start := (page - 1) * size
 	if len(locations) <= start {
@@ -88,9 +106,16 @@ func (s *Service) findNearby(ctx context.Context, kind uint64, x, y float64, pag
 }
 
 // The index, readiness marker and lease share the category's Redis hash tag.
-var claimGeoBuild = redis.NewScript(`
-if redis.call('EXISTS', KEYS[1]) == 1 then return 2 end
-if redis.call('SET', KEYS[2], ARGV[1], 'NX', 'PX', ARGV[2]) then return 1 end
+const checkGeoReady = `
+local ready = redis.call('GET', KEYS[2])
+local indexReady = ready == '0' or (ready == '1' and redis.call('EXISTS', KEYS[1]) == 1)
+`
+
+var geoReady = redis.NewScript(checkGeoReady + `return indexReady and 1 or 0`)
+
+var claimGeoBuild = redis.NewScript(checkGeoReady + `
+if indexReady then return 2 end
+if redis.call('SET', KEYS[3], ARGV[1], 'NX', 'PX', ARGV[2]) then return 1 end
 return 0
 `)
 
@@ -102,7 +127,7 @@ for first = 4, #ARGV, 600 do
     redis.call('GEOADD', KEYS[1], unpack(ARGV, first, math.min(first + 599, #ARGV)))
 end
 redis.call('PEXPIRE', KEYS[1], ARGV[3])
-redis.call('SET', KEYS[2], '1', 'PX', ARGV[2])
+redis.call('SET', KEYS[2], #ARGV > 3 and '1' or '0', 'PX', ARGV[2])
 redis.call('DEL', KEYS[3])
 return 1
 `)
@@ -119,13 +144,13 @@ func (s *Service) geoIndex(ctx context.Context, kind uint64) (string, error) {
 	}
 	key := fmt.Sprintf("shop:geo:{%d}:%d", kind, revision)
 	ready, lease := key+":ready", key+":build"
-	present, err := s.cache.Exists(ctx, ready).Result()
+	present, err := geoReady.Run(ctx, s.cache, []string{key, ready}).Int()
 	if err != nil || present > 0 {
 		return key, err
 	}
 	token := rand.Text()
 	for {
-		state, err := claimGeoBuild.Run(ctx, s.cache, []string{ready, lease}, token, (2 * time.Second).Milliseconds()).Int()
+		state, err := claimGeoBuild.Run(ctx, s.cache, []string{key, ready, lease}, token, (2 * time.Second).Milliseconds()).Int()
 		if err != nil || state == 2 {
 			return key, err
 		}

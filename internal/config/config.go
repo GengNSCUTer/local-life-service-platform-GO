@@ -10,6 +10,7 @@ import (
 
 type Config struct {
 	HTTPAddr               string
+	HTTPIdleTimeout        time.Duration
 	WorkerHealthAddr       string
 	ObservabilityAddr      string
 	PprofEnabled           bool
@@ -60,6 +61,7 @@ func Load() Config {
 	}
 	return Config{
 		HTTPAddr:               env("HTTP_ADDR", "127.0.0.1:8080"),
+		HTTPIdleTimeout:        durationEnv("HTTP_IDLE_TIMEOUT", time.Minute),
 		WorkerHealthAddr:       env("WORKER_HEALTH_ADDR", "127.0.0.1:8081"),
 		ObservabilityAddr:      env("OBSERVABILITY_ADDR", ""),
 		PprofEnabled:           pprofEnabled,

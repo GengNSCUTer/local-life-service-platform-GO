@@ -70,12 +70,16 @@ func runAPI(ctx context.Context, cfg config.Config, logger *slog.Logger, startWo
 			runErr = errors.Join(runErr, waitBackground(done, backgroundLoops))
 		}()
 	}
+	idleTimeout := cfg.HTTPIdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = time.Minute
+	}
 	server := &http.Server{
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		IdleTimeout:       idleTimeout,
 	}
 	serveDone := make(chan error, 1)
 	go func() {

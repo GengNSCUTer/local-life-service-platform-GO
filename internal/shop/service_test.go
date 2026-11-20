@@ -41,3 +41,32 @@ func TestInvalidationRejectsAnOlderCacheFill(t *testing.T) {
 		t.Fatalf("cache returned %q, %v", got, err)
 	}
 }
+
+func TestGeoIndexReadinessAfterEviction(t *testing.T) {
+	addr := os.Getenv("HMDP_SHOP_TEST_REDIS_ADDR")
+	if addr == "" {
+		t.Skip("set HMDP_SHOP_TEST_REDIS_ADDR to an isolated Redis server")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	cache := redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD")})
+	defer cache.Close()
+	key := "test:geo:{" + rand.Text() + "}"
+	keys := []string{key, key + ":ready", key + ":build"}
+	defer cache.Del(ctx, keys...)
+	if err := cache.Set(ctx, keys[1], "1", time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := geoReady.Run(ctx, cache, keys[:2]).Int(); err != nil || got != 0 {
+		t.Fatalf("evicted index readiness = %d, %v", got, err)
+	}
+	if got, err := claimGeoBuild.Run(ctx, cache, keys, "builder", 5000).Int(); err != nil || got != 1 {
+		t.Fatalf("claim after eviction = %d, %v", got, err)
+	}
+	if got, err := finishGeoBuild.Run(ctx, cache, keys, "builder", 60000, 61000).Int(); err != nil || got != 1 {
+		t.Fatalf("finish an empty index = %d, %v", got, err)
+	}
+	if got, err := geoReady.Run(ctx, cache, keys[:2]).Int(); err != nil || got != 1 {
+		t.Fatalf("intentionally empty index readiness = %d, %v", got, err)
+	}
+}

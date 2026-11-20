@@ -30,6 +30,8 @@ type counts struct {
 func main() {
 	target := flag.String("target", "http://127.0.0.1:8080", "base URL of the local test API")
 	voucher := flag.Uint64("voucher-id", 0, "activity ID")
+	vouchers := flag.Int("vouchers", 1, "activities starting at voucher-id")
+	rate := flag.Int("rate", 0, "offered requests per second, zero for unlimited")
 	requests := flag.Int("requests", 1_000_000, "total requests")
 	workers := flag.Int("workers", 256, "maximum concurrent requests")
 	users := flag.Int("users", 16_384, "number of sequentially numbered test sessions")
@@ -42,7 +44,7 @@ func main() {
 	if ip := net.ParseIP(base.Hostname()); ip == nil || !ip.IsLoopback() {
 		log.Fatal("target must use a loopback IP")
 	}
-	if *voucher == 0 || *requests < 1 || *workers < 1 || *users < 1 || *workers > *requests {
+	if *voucher == 0 || *requests < 1 || *workers < 1 || *users < 1 || *workers > *requests || *vouchers < 1 || *vouchers > *requests || *rate < 0 || *rate > 1_000_000 || uint64(*vouchers-1) > ^uint64(0)-*voucher {
 		log.Fatal("provide a positive activity ID and positive requests, workers, and users")
 	}
 
@@ -50,7 +52,10 @@ func main() {
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 5 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	endpoint := base.String() + "/voucher-order/seckill/" + strconv.FormatUint(*voucher, 10)
+	endpoints := make([]string, *vouchers)
+	for i := range endpoints {
+		endpoints[i] = base.String() + "/voucher-order/seckill/" + strconv.FormatUint(*voucher+uint64(i), 10)
+	}
 	tokens := make([]string, *users)
 	for i := range tokens {
 		tokens[i] = "Bearer " + *prefix + strconv.Itoa(i+1)
@@ -63,8 +68,13 @@ func main() {
 		active.Go(func() {
 			var result counts
 			for i := worker; i < *requests; i += *workers {
+				if *rate > 0 {
+					seconds, fraction := i / *rate, i%*rate
+					deadline := started.Add(time.Duration(seconds)*time.Second + time.Duration(fraction)*time.Second/time.Duration(*rate))
+					time.Sleep(time.Until(deadline))
+				}
 				start := time.Now()
-				result.send(client, endpoint, tokens[i%len(tokens)])
+				result.send(client, endpoints[i%len(endpoints)], tokens[(i/len(endpoints))%len(tokens)])
 				bucket := min(int((time.Since(start)+time.Millisecond-1)/time.Millisecond), maxLatencyMS)
 				result.latencies[bucket]++
 			}

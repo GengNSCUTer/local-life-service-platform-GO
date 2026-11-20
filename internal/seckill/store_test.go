@@ -33,7 +33,7 @@ func TestConcurrentConfirmationAndTimeoutKeepStockConsistent(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	activity := Activity{ID: uint64(now.UnixNano()), TotalStock: stock, RemainingStock: stock,
 		StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Minute)}
-	if err := createActivity(ctx, db, activity); err != nil {
+	if err := db.WithContext(ctx).Table("seckill_activities").Create(&activity).Error; err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
@@ -111,7 +111,7 @@ func TestPersistOrderCanBeReplayedAfterStockReachesZero(t *testing.T) {
 		ID: activityID, TotalStock: 1, RemainingStock: 1,
 		StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Minute),
 	}
-	if err := createActivity(ctx, db, activity); err != nil {
+	if err := db.WithContext(ctx).Table("seckill_activities").Create(&activity).Error; err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
@@ -169,7 +169,7 @@ func TestCancelledOrderCanBeReplayedAndBuyerCanPurchaseAgain(t *testing.T) {
 		ID: activityID, TotalStock: 2, RemainingStock: 2,
 		StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Minute),
 	}
-	if err := createActivity(ctx, db, activity); err != nil {
+	if err := db.WithContext(ctx).Table("seckill_activities").Create(&activity).Error; err != nil {
 		t.Fatal(err)
 	}
 	defer func() {

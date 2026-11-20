@@ -75,17 +75,22 @@ func loadOrder(ctx context.Context, db *gorm.DB, id string) (Order, error) {
 }
 
 func createActivity(ctx context.Context, db *gorm.DB, activity Activity) error {
-	if err := db.WithContext(ctx).Table("seckill_activities").Create(&activity).Error; err != nil {
+	if activity.StartsAt.After(time.Now()) {
+		err := db.WithContext(ctx).Table("seckill_activities").Create(&activity).Error
 		if !duplicateKey(err) {
 			return err
 		}
-		var existing Activity
-		if err := db.WithContext(ctx).Table("seckill_activities").First(&existing, "id = ?", activity.ID).Error; err != nil {
-			return err
-		}
-		if existing.TotalStock != activity.TotalStock || !existing.StartsAt.Equal(activity.StartsAt) || !existing.EndsAt.Equal(activity.EndsAt) {
-			return errors.New("activity ID already has different stock or times")
-		}
+	}
+	var existing Activity
+	err := db.WithContext(ctx).Table("seckill_activities").First(&existing, "id = ?", activity.ID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ErrStockWindowStarted
+	}
+	if err != nil {
+		return err
+	}
+	if existing.TotalStock != activity.TotalStock || !existing.StartsAt.Equal(activity.StartsAt) || !existing.EndsAt.Equal(activity.EndsAt) {
+		return errors.New("activity ID already has different stock or times")
 	}
 	return nil
 }

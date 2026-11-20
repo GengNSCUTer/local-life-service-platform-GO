@@ -6,7 +6,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 : "${KAFKA_BIN_DIR:?set KAFKA_BIN_DIR to the Kafka bin directory}"
 redis_bin=${REDIS_BIN_DIR:-/usr/bin}
 mode=${1:-restore}
-case "$mode" in restore|soak|capacity|catalog) ;; *) echo 'usage: scripts/stage7-local.sh [restore|soak|capacity|catalog]' >&2; exit 2 ;; esac
+case "$mode" in restore|soak|capacity|catalog|orders) ;; *) echo 'usage: scripts/stage7-local.sh [restore|soak|capacity|catalog|orders]' >&2; exit 2 ;; esac
 port=${STAGE7_BASE_PORT:-29840}
 python3 - "$port" <<'PY'
 import socket
@@ -36,7 +36,7 @@ export REDIS_PASSWORD=stage7_local_redis REDISCLI_AUTH=stage7_local_redis REDIS_
 export SECKILL_OUTBOX_LIMIT=0 SECKILL_PENDING_LIMIT=0 SECKILL_PENDING_TIMEOUT=15m KAFKA_CONSUMER_WORKERS=${KAFKA_CONSUMER_WORKERS:-3}
 mysql=("$MYSQL_BIN_DIR/mysql" --no-defaults -u root --socket="$work/mysql.sock")
 redis=("$redis_bin/redis-cli" --raw -p "$((port+2))")
-mysql_pid= redis_pid= kafka_pid= api_pid= worker_pid= second_pid= second_worker_pid=
+benchmark_pid= mysql_pid= redis_pid= kafka_pid= api_pid= worker_pid= second_pid= second_worker_pid=
 voucher_id=9700
 stop() {
     local pid=$1 result=0
@@ -54,6 +54,7 @@ stop() {
     fi
 }
 cleanup() {
+    stop "$benchmark_pid" || true
     stop "$second_worker_pid" || true
     stop "$second_pid" || true
     stop "$api_pid" || true
@@ -61,7 +62,7 @@ cleanup() {
     stop "$kafka_pid" || true
     stop "$redis_pid" || true
     stop "$mysql_pid" || true
-    if [[ "$mode" == catalog ]]; then
+    if [[ "$mode" == catalog || "$mode" == orders ]]; then
         rm -rf -- "$work/source" "$work/kafka-logs" "$work/api" "$work/worker"
     fi
 }
@@ -102,7 +103,11 @@ start_mysql() {
     "${mysql[@]}" -e "CREATE DATABASE $MYSQL_DATABASE; CREATE USER '$MYSQL_USER'@'127.0.0.1' IDENTIFIED BY '$MYSQL_PASSWORD'; GRANT ALL ON $MYSQL_DATABASE.* TO '$MYSQL_USER'@'127.0.0.1';"
 }
 run_mysql() {
-    "$MYSQL_BIN_DIR/mysqld" --no-defaults --basedir="$(dirname -- "$MYSQL_BIN_DIR")" --datadir="$1" --bind-address=127.0.0.1 --port="$((port+1))" --mysqlx=OFF --socket="$work/mysql.sock" --pid-file="$work/mysql.pid" >>"$work/mysql.log" 2>&1 & mysql_pid=$!
+    local -a options=()
+    if [[ "$mode" == orders ]]; then
+        options+=(--innodb-buffer-pool-size=1G --innodb-flush-log-at-trx-commit=2 --sync-binlog=0)
+    fi
+    "$MYSQL_BIN_DIR/mysqld" --no-defaults "${options[@]}" --basedir="$(dirname -- "$MYSQL_BIN_DIR")" --datadir="$1" --bind-address=127.0.0.1 --port="$((port+1))" --mysqlx=OFF --socket="$work/mysql.sock" --pid-file="$work/mysql.pid" >>"$work/mysql.log" 2>&1 & mysql_pid=$!
     for attempt in $(seq 1 120); do
         if "${mysql[@]}" -e 'SELECT 1' >/dev/null 2>&1; then break; fi
         sleep .25
@@ -111,8 +116,10 @@ run_mysql() {
 }
 start_redis() {
     mkdir -p "$1"
+    local fsync=always
+    if [[ "$mode" == orders ]]; then fsync=everysec; fi
     "$redis_bin/redis-server" --bind 127.0.0.1 --port "$((port+2))" --requirepass "$REDIS_PASSWORD" --save '' \
-        --appendonly yes --appendfsync always --dir "$1" >>"$work/redis.log" 2>&1 & redis_pid=$!
+        --appendonly yes --appendfsync "$fsync" --dir "$1" >>"$work/redis.log" 2>&1 & redis_pid=$!
     for attempt in $(seq 1 120); do
         if "${redis[@]}" ping 2>/dev/null | grep -qx PONG; then return; fi
         sleep .25
@@ -196,6 +203,11 @@ if [[ "$mode" == restore ]]; then export SECKILL_PENDING_LIMIT=2; fi
 if [[ "$mode" == catalog ]]; then export AUTH_DEV_LOG_CODES=true; fi
 if [[ "$mode" == capacity ]]; then
     export PPROF_ENABLED=true KAFKA_CONSUMER_WORKERS=2
+fi
+if [[ "$mode" == orders ]]; then
+    source scripts/million-orders.sh
+    run_million_orders
+    exit 0
 fi
 start_api
 start_worker

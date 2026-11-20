@@ -43,7 +43,7 @@ func TestReservationRecovery(t *testing.T) {
 			event := orderEvent{Version: 1, ID: rand.Text(), VoucherID: uint64(time.Now().UnixNano()), UserID: 1, CreatedAt: now}
 			activity := activityKey(event.VoucherID)
 			for _, err := range []error{
-				createActivity(ctx, db, Activity{ID: event.VoucherID, TotalStock: 2, RemainingStock: 2, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Minute)}),
+				db.WithContext(ctx).Table("seckill_activities").Create(&Activity{ID: event.VoucherID, TotalStock: 2, RemainingStock: 2, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Minute)}).Error,
 				cache.HSet(ctx, activity, "stock", 2, "starts_at", now.Add(-time.Minute).UnixMilli(), "ends_at", now.Add(time.Minute).UnixMilli()).Err(),
 			} {
 				if err != nil {
@@ -148,6 +148,29 @@ func TestReservationRecovery(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("late initial preparation can be retried with a future window", func(t *testing.T) {
+		ctx, stop := context.WithTimeout(t.Context(), 10*time.Second)
+		defer stop()
+		now := time.Now().UTC()
+		item := Activity{ID: uint64(now.UnixNano()), TotalStock: 2, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour)}
+		defer db.Exec("DELETE FROM seckill_activities WHERE id = ?", item.ID)
+		defer cache.Del(t.Context(), activityKey(item.ID))
+		if err := service.Prepare(ctx, item); !errors.Is(err, ErrStockWindowStarted) {
+			t.Fatalf("prepare a new activity after the start returned %v", err)
+		}
+		var count int64
+		if err := db.Table("seckill_activities").Where("id = ?", item.ID).Count(&count).Error; err != nil || count != 0 {
+			t.Fatalf("rejected preparation left %d activities, query error %v", count, err)
+		}
+		item.StartsAt = now.Add(time.Minute)
+		if err := service.Prepare(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+		if err := service.Prepare(ctx, item); err != nil {
+			t.Fatalf("retry after successful preparation: %v", err)
+		}
+	})
 
 	t.Run("malformed dead letter keeps consumer moving", func(t *testing.T) {
 		message := kafka.Message{Partition: 0, Offset: time.Now().UnixNano(), Value: []byte(`{"order_id":"too long for the order ID database field"}`)}
