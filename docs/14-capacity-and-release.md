@@ -80,3 +80,35 @@ MySQL 进程停止后，API 的 `/health/ready` 返回 `503`，`/health/live` �
 `capacity` 模式另含 600 笔混合积压演练。两个 Worker 停止时，两个 API 在 30 秒内受理 600 笔真实抢券。演练从 Redis 提取其中 300 条 Lua 生成的事件，通过 Kafka 确认写入后从 Redis outbox 删除这些条目。三个 Kafka 分区的 lag 分别为 104、98 和 98，Redis outbox 还有 300 条。重启 Worker 后 **31 秒**内 600 笔全部确认，Kafka lag 和 Redis 两个队列归零，MySQL 和 Redis 库存均为零，对账一致。31 秒从开始重启计算，含进程准备与指标采样。演练记录在 `backlog.tsv`、`backlog-kafka-before.txt` 和 `backlog-audit.json`。
 
 本机已覆盖同机 Worker 重启、MySQL 重启和两种队列同时积压。跨主机故障仍按本页多主机方案验收。
+
+## 共享 MySQL 的 Worker 扩容对照
+
+2026 年 11 月 20 日在 3090 上，用同一套隔离的 MySQL、Redis 和单 Broker Kafka，按 `1 → 2 → 3 → 3 → 2 → 1` 个 Worker 运行六轮。每轮用独立的 24 个活动，共提交 14,400 笔真实抢券，速率固定为 600 请求/秒，持续 24 秒。每个 Worker 启动 4 个 Consumer，Kafka 固定 12 个订单分区。各轮的 Relay 总数为 24，Worker 的 MySQL 最大连接数合计为 48，`GOMAXPROCS` 合计为 12。测试沿用[百万落单的刷盘配置](17-v1-validation.md)。
+
+| Worker | Consumer | 端到端确认/秒 | 停止提交到落库及 Redis 清空 | Kafka lag 采样峰值 | MySQL 行锁等待次数 | MySQL 行锁累计等待 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 4 | 277 | 29.6 秒 | 6,395 条 | 874 | 19.1 秒 |
+| 2 | 8 | 401 | 12.6 秒 | 2,929 条 | 1,399 | 28.0 秒 |
+| 3 | 12 | 445 | 9.4 秒 | 2,943 条 | 2,294 | 72.8 秒 |
+
+表中取同档两轮的中位数。确认速率为总确认数除以从开始提交至首次采样发现全部落库且 Redis 队列为零的时间。Kafka lag 每 10 秒更新一次，峰值可能出现在两次采样之间，各轮另外用 Kafka CLI 核对 12 个分区的最终 lag 均为零。行锁取隔离 MySQL 实例的 `Innodb_row_lock_waits` 和 `Innodb_row_lock_time` 前后差值。累计等待包含各事务的等待时间之和。
+
+| 轮次 | Worker | 确认/秒 | 停止提交后的排空时间 | Kafka lag 采样峰值 | 行锁等待次数 | 累计锁等待 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1 | 325 | 20.37 秒 | 4,876 | 848 | 8.62 秒 |
+| 2 | 2 | 456 | 7.57 秒 | 1,721 | 1,288 | 14.84 秒 |
+| 3 | 3 | 523 | 3.53 秒 | 2,776 | 1,914 | 34.21 秒 |
+| 4 | 3 | 367 | 15.24 秒 | 3,110 | 2,673 | 111.30 秒 |
+| 5 | 2 | 347 | 17.53 秒 | 4,137 | 1,509 | 41.08 秒 |
+| 6 | 1 | 229 | 38.90 秒 | 7,913 | 899 | 29.60 秒 |
+
+六轮累计 86,400 笔全部返回 `202` 并确认，HTTP P99 为 10–20 ms，144 个活动全部通过库存对账，零取消、死信或预占异常。1 扩到 2 个 Worker 时，确认速率提高约 45%，Kafka 峰值积压减半。2 扩到 3 个时，确认速率多约 11%，Kafka 峰值基本持平，累计锁等待约为两 Worker 的 2.6 倍。两轮之间存在波动，24 秒的本机测试只能给出这一负载的扩容对照。Worker 与 Consumer 数按同一比例变化，表中反映两者联动的效果。
+
+```bash
+export MYSQL_BIN_DIR=/path/to/mysql/bin
+export REDIS_BIN_DIR=/path/to/redis/bin
+export KAFKA_BIN_DIR=/path/to/kafka/bin
+STAGE7_BASE_PORT=31410 GOMAXPROCS=6 scripts/stage7-local.sh worker-scale
+```
+
+各轮 HTTP 汇总、采样、Kafka 最终位点与逐活动审计保留在 `runtime/stage7-worker-scale.*/round-*`。测试进程停止后清理隔离中间件的数据目录。

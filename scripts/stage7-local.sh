@@ -6,7 +6,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 : "${KAFKA_BIN_DIR:?set KAFKA_BIN_DIR to the Kafka bin directory}"
 redis_bin=${REDIS_BIN_DIR:-/usr/bin}
 mode=${1:-restore}
-case "$mode" in restore|soak|capacity|catalog|orders) ;; *) echo 'usage: scripts/stage7-local.sh [restore|soak|capacity|catalog|orders]' >&2; exit 2 ;; esac
+case "$mode" in restore|soak|capacity|catalog|orders|worker-scale) ;; *) echo 'usage: scripts/stage7-local.sh [restore|soak|capacity|catalog|orders|worker-scale]' >&2; exit 2 ;; esac
 port=${STAGE7_BASE_PORT:-29840}
 python3 - "$port" <<'PY'
 import socket
@@ -37,6 +37,7 @@ export SECKILL_OUTBOX_LIMIT=0 SECKILL_PENDING_LIMIT=0 SECKILL_PENDING_TIMEOUT=15
 mysql=("$MYSQL_BIN_DIR/mysql" --no-defaults -u root --socket="$work/mysql.sock")
 redis=("$redis_bin/redis-cli" --raw -p "$((port+2))")
 benchmark_pid= mysql_pid= redis_pid= kafka_pid= api_pid= worker_pid= second_pid= second_worker_pid=
+scale_worker_pids=()
 voucher_id=9700
 stop() {
     local pid=$1 result=0
@@ -55,18 +56,19 @@ stop() {
 }
 cleanup() {
     stop "$benchmark_pid" || true
+    for pid in "${scale_worker_pids[@]}"; do stop "$pid" || true; done
     stop "$second_worker_pid" || true
     stop "$second_pid" || true
     stop "$api_pid" || true
     stop "$worker_pid" || true
     stop "$kafka_pid" || true
     stop "$redis_pid" || true
-    if [[ "$mode" == orders ]]; then
+    if [[ "$mode" == orders || "$mode" == worker-scale ]]; then
         stop "$mysql_pid" 120 || true
     else
         stop "$mysql_pid" || true
     fi
-    if [[ "$mode" == catalog || "$mode" == orders ]]; then
+    if [[ "$mode" == catalog || "$mode" == orders || "$mode" == worker-scale ]]; then
         rm -rf -- "$work/source" "$work/kafka-logs" "$work/api" "$work/worker"
     fi
 }
@@ -108,7 +110,7 @@ start_mysql() {
 }
 run_mysql() {
     local -a options=()
-    if [[ "$mode" == orders ]]; then
+    if [[ "$mode" == orders || "$mode" == worker-scale ]]; then
         options+=(--innodb-buffer-pool-size=1G --innodb-flush-log-at-trx-commit=2 --sync-binlog=0)
     fi
     "$MYSQL_BIN_DIR/mysqld" --no-defaults "${options[@]}" --basedir="$(dirname -- "$MYSQL_BIN_DIR")" --datadir="$1" --bind-address=127.0.0.1 --port="$((port+1))" --mysqlx=OFF --socket="$work/mysql.sock" --pid-file="$work/mysql.pid" >>"$work/mysql.log" 2>&1 & mysql_pid=$!
@@ -121,7 +123,7 @@ run_mysql() {
 start_redis() {
     mkdir -p "$1"
     local fsync=always
-    if [[ "$mode" == orders ]]; then fsync=everysec; fi
+    if [[ "$mode" == orders || "$mode" == worker-scale ]]; then fsync=everysec; fi
     "$redis_bin/redis-server" --bind 127.0.0.1 --port "$((port+2))" --requirepass "$REDIS_PASSWORD" --save '' \
         --appendonly yes --appendfsync "$fsync" --dir "$1" >>"$work/redis.log" 2>&1 & redis_pid=$!
     for attempt in $(seq 1 120); do
@@ -207,6 +209,11 @@ if [[ "$mode" == restore ]]; then export SECKILL_PENDING_LIMIT=2; fi
 if [[ "$mode" == catalog ]]; then export AUTH_DEV_LOG_CODES=true; fi
 if [[ "$mode" == capacity ]]; then
     export PPROF_ENABLED=true KAFKA_CONSUMER_WORKERS=2
+fi
+if [[ "$mode" == worker-scale ]]; then
+    source scripts/worker-scale.sh
+    run_worker_scale
+    exit 0
 fi
 if [[ "$mode" == orders ]]; then
     source scripts/million-orders.sh
