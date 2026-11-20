@@ -43,7 +43,7 @@ stop() {
     if [[ -n "$pid" ]]; then
         kill -TERM "$pid" 2>/dev/null || true
         # Reap owned children before temporary data can be removed. Bound shutdown.
-        local deadline=$((SECONDS + 30))
+        local deadline=$((SECONDS + ${2:-30}))
         while kill -0 "$pid" 2>/dev/null && (( SECONDS < deadline )); do sleep .2; done
         if kill -0 "$pid" 2>/dev/null; then
             printf 'Local process %s exceeded graceful shutdown timeout\n' "$pid" >&2
@@ -61,7 +61,11 @@ cleanup() {
     stop "$worker_pid" || true
     stop "$kafka_pid" || true
     stop "$redis_pid" || true
-    stop "$mysql_pid" || true
+    if [[ "$mode" == orders ]]; then
+        stop "$mysql_pid" 120 || true
+    else
+        stop "$mysql_pid" || true
+    fi
     if [[ "$mode" == catalog || "$mode" == orders ]]; then
         rm -rf -- "$work/source" "$work/kafka-logs" "$work/api" "$work/worker"
     fi
