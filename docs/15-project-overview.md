@@ -48,3 +48,19 @@ flowchart LR
 - 支持查看库存、积压、死信与补偿状态。备份恢复能在隔离环境复现。
 - 已记录千万级 HTTP 场景、长时间真实下单、多个本机进程的容量演练，以及 Redis、Kafka 和 MySQL 故障结果。
 - 生产验收还需落实跨主机故障、百万常驻连接、多 Broker 整套备份恢复和生产容量基线。阶段 8 文档提供对应的指标与验收步骤。
+
+## 从一次请求看到各层的职责
+
+| 用例 | 接口 | 源码里发生的事 |
+| --- | --- | --- |
+| 登录并访问个人资料 | `POST /user/code`、`POST /user/login`、`GET /user/me` | 验证码用 Redis Lua 一次性核销。登录后 Redis Hash 保存用户和会话有效期。鉴权中间件读取 `Authorization: Bearer <token>`，把身份放入请求的 Go `Context`，且接近过期时才续期。`/user/me` 直接读出已验证身份。 |
+| 看店铺详情 | `GET /shop/:id` | 先读 Redis，未命中时查 MySQL 并回填。每个 API 进程有 64 个带缓冲通道，通过店铺 ID 取模来限制同一组缓存回填。不同进程共享 Redis，分别管理自己的通道。 |
+| 查附近店铺 | `GET /shop/of/type?typeId=1&x=113.32&y=23.13` | Java 版常用参数仍可用。Go 版先查 MySQL 分类版本，再用 Redis `GEOSEARCH` 找 5 公里内的 ID 和距离，最后用 MySQL 查详情，在 Go 中还原距离顺序。 |
+| 发帖和关注动态 | `POST /blog`、`GET /blog/of/follow`、`GET /blog/notifications` | 发帖事务同时写博客和通知的 outbox。Worker 投递 Kafka 并消费，分批把通知写入关注者的 Redis Sorted Set。关注动态走 MySQL 并按博客 ID 使用游标翻页。 |
+| 抢券和确认订单 | `POST /voucher-order/seckill/:id`、`GET /voucher-order/:id` | HTTP Handler 从 `Context` 读用户 ID。Lua 先预占库存并写 outbox，Worker 经 Kafka 异步落库。HTTP `202` 表示已受理，查到 `confirmed` 才表示订单已在 MySQL 确认。 |
+
+目录结构和进程生命周期可以一起读。`internal/app` 在入口创建连接并用构造函数传给各模块。Gin Handler 基于请求创建带超时的 `Context`，把它传给 GORM 和 go-redis。`cmd/worker` 通过 `signal.NotifyContext` 接收退出信号，并将取消传播到后台循环。循环中的 goroutine 用 `sync.WaitGroup` 汇合，Worker 等后台任务退场，再释放连接。
+
+源码入口见 [API 和 Worker 组装](../internal/app)、[身份中间件](../internal/user/http.go)、[店铺详情缓存](../internal/shop/service.go)、[GEO 查询](../internal/shop/geo.go)、[社交通知](../internal/social/notifications.go)和[秒杀 Worker](../internal/seckill/worker.go)。
+
+在用户、店铺和博客达到更大数据量时，可用[目录与社交容量基线](16-catalog-capacity.md)复现查询压测，查看优先优化项。

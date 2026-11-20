@@ -6,7 +6,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 : "${KAFKA_BIN_DIR:?set KAFKA_BIN_DIR to the Kafka bin directory}"
 redis_bin=${REDIS_BIN_DIR:-/usr/bin}
 mode=${1:-restore}
-case "$mode" in restore|soak|capacity) ;; *) echo 'usage: scripts/stage7-local.sh [restore|soak|capacity]' >&2; exit 2 ;; esac
+case "$mode" in restore|soak|capacity|catalog) ;; *) echo 'usage: scripts/stage7-local.sh [restore|soak|capacity|catalog]' >&2; exit 2 ;; esac
 port=${STAGE7_BASE_PORT:-29840}
 python3 - "$port" <<'PY'
 import socket
@@ -25,7 +25,7 @@ for number in range(port, port + 11):
 PY
 mkdir -p runtime
 work=$(mktemp -d "$PWD/runtime/stage7-$mode.XXXXXX")
-export TMPDIR="$work"
+export TMPDIR="$work" GOTMPDIR="$work"
 export LOG_DIR="$work/kafka-logs"
 export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:-} -XX:ActiveProcessorCount=4 -XX:-UsePerfData -Djava.io.tmpdir=$work"
 export KAFKA_HEAP_OPTS=${KAFKA_HEAP_OPTS:-'-Xms128m -Xmx384m'}
@@ -42,6 +42,13 @@ stop() {
     local pid=$1 result=0
     if [[ -n "$pid" ]]; then
         kill -TERM "$pid" 2>/dev/null || true
+        # Reap owned children before temporary data can be removed. Bound shutdown.
+        local deadline=$((SECONDS + 30))
+        while kill -0 "$pid" 2>/dev/null && (( SECONDS < deadline )); do sleep .2; done
+        if kill -0 "$pid" 2>/dev/null; then
+            printf 'Local process %s exceeded graceful shutdown timeout\n' "$pid" >&2
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
         wait "$pid" || result=$?
         [[ "$result" == 0 || "$result" == 143 ]]
     fi
@@ -54,11 +61,14 @@ cleanup() {
     stop "$kafka_pid" || true
     stop "$redis_pid" || true
     stop "$mysql_pid" || true
+    if [[ "$mode" == catalog ]]; then
+        rm -rf -- "$work/source" "$work/kafka-logs" "$work/api" "$work/worker"
+    fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-printf 'Local seckill logs and data: %s\n' "$work"
+printf 'Local validation artifacts: %s\n' "$work"
 
 go build -o "$work/api" ./cmd/api
 go build -o "$work/worker" ./cmd/worker
@@ -183,12 +193,18 @@ start_redis "$work/source/redis"
 "$KAFKA_BIN_DIR/kafka-storage.sh" format -t "$("$KAFKA_BIN_DIR/kafka-storage.sh" random-uuid)" -c "$work/kafka.properties" >/dev/null
 start_kafka "$work/kafka.properties"
 if [[ "$mode" == restore ]]; then export SECKILL_PENDING_LIMIT=2; fi
+if [[ "$mode" == catalog ]]; then export AUTH_DEV_LOG_CODES=true; fi
 if [[ "$mode" == capacity ]]; then
     export PPROF_ENABLED=true KAFKA_CONSUMER_WORKERS=2
 fi
 start_api
 start_worker
 
+if [[ "$mode" == catalog ]]; then
+    source scripts/catalog-scenarios.sh
+    run_catalog
+    exit 0
+fi
 if [[ "$mode" == capacity ]]; then
     source scripts/stage8-scenarios.sh
     run_capacity
