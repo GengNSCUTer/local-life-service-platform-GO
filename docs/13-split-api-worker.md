@@ -68,9 +68,18 @@ STAGE7_BASE_PORT=29860 SOAK_SECONDS=3660 SOAK_RATE=10 scripts/stage7-local.sh so
 | MySQL、Redis、Kafka 冷备份恢复 | MySQL 原有一笔确认订单，Redis outbox 一笔待投递订单，Kafka 一笔待消费订单，以及消费组已提交位置均恢复。Worker 启动后恢复两笔 pending，Kafka lag 清零 |
 | 待处理上限 | Redis outbox 只有一笔，另有一笔已进入 Kafka。达到总上限时新请求返回 `503`，库存维持原值。恢复后重试成功，累计确认四笔，剩余库存为 0 |
 | 三 Broker 本机故障 | 停掉一个进程时 API 仍就绪。Broker 回归后订单主题三个分区的 ISR 均恢复到 3 |
+| Redis Sentinel 本机切主 | 独立 API 和 Worker 都重新连接到新主，切换前后两笔订单均确认，新主库存为 0 |
 | Worker 扩缩容 | 两个 Worker 分别获得订单分区。退出其中一个后，剩余 Worker 接管全部三个分区 |
 | 60 秒真实落单 | 3 个 Consumer，每秒 10 笔，600 笔获接收并最终确认，队列和 lag 清零，库存对账一致 |
 | 确认与超时并发回归 | 在真实 MySQL 上重复运行三轮。每轮对同一活动并行提交 24 对确认和取消，订单数、领取资格和剩余库存均通过核对 |
+
+### 61 分钟持续真实下单
+
+在同一台机器上运行 API、Worker、MySQL、Redis 和三个 Kafka Broker，使用 36,600 个不同的抢券会话，每秒提交 10 笔，测试预占超时设为 120 秒。请求持续 3,660.01 秒，全部返回 `202`，HTTP P99 为 469.84 ms。最终有 34,260 笔确认、2,340 笔超时取消。Redis 与 MySQL 的剩余库存均为 2,340，库存对账为 `consistent`。Kafka 三个订单分区的 lag、Redis outbox、预占超时索引和未同步补偿数均为 0。
+
+前段用 1 个 Consumer，Kafka lag 增至约 2,000 条，预占开始超时。扩到 3 个 Consumer 时，InnoDB 报告了确认和超时取消事务的锁循环。不中断 HTTP 流量，换上统一加锁顺序的 Worker 后，修复版本日志中未再出现 `Error 1213`，积压随后排空。修复版本 Worker 约 40 分钟采样的 goroutine 数在 75 至 81 之间，结束时 API 和 Worker 的 MySQL 使用中连接和连接池等待次数均为 0。
+
+这次长测包含 Kafka Broker 崩溃、Worker 扩缩容和运行中换版。全程以修复版本承载的单独短测确认了 600 笔。更高的持续落单速率、MySQL 活动行热点、Kafka 批量提交与 Redis Cluster 分片仍可继续测量。
 
 Docker Compose 配置通过校验。当前用户无权连接 Docker daemon，演练使用本机进程。
 
