@@ -29,7 +29,7 @@
 
 ```bash
 docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/003_user.sql
-AUTH_DEV_LOG_CODES=true go run ./cmd/api
+AUTH_DEV_LOG_CODES=true go run ./cmd/all
 ```
 
 另开一个终端，先发验证码，再从 API 日志里的 `development login code` 读取 `code` 字段。

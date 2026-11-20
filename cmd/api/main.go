@@ -31,7 +31,7 @@ func main() {
 func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	cfg := config.Load()
 	if len(args) == 0 {
-		return app.Run(ctx, cfg, logger)
+		return app.RunAPI(ctx, cfg, logger)
 	}
 	if args[0] == "audit-seckill" {
 		flags := flag.NewFlagSet(args[0], flag.ContinueOnError)

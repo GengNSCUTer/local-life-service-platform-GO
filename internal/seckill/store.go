@@ -9,7 +9,6 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 const (
@@ -93,20 +92,15 @@ func createActivity(ctx context.Context, db *gorm.DB, activity Activity) error {
 
 func persistOrder(ctx context.Context, db *gorm.DB, event orderEvent) error {
 	order := event.order(statusConfirmed)
-	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var existing Order
-		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("seckill_orders").
-			Take(&existing, "id = ?", order.ID).Error
-		if err == nil {
-			if existing.VoucherID == order.VoucherID && existing.UserID == order.UserID &&
-				(existing.Status == statusConfirmed || existing.Status == statusCancelled) {
-				return nil
-			}
-			return errOrderConflict
-		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
+	existing, err := loadOrder(ctx, db, order.ID)
+	if err == nil {
+		return matchFinalOrder(existing, order)
+	}
+	if !errors.Is(err, errOrderNotFound) {
+		return err
+	}
+	err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Take the activity lock first, matching cancellation and the order foreign key.
 		update := tx.Table("seckill_activities").Where("id = ? AND remaining_stock > 0", order.VoucherID).
 			UpdateColumn("remaining_stock", gorm.Expr("remaining_stock - 1"))
 		if update.Error != nil {
@@ -128,11 +122,7 @@ func persistOrder(ctx context.Context, db *gorm.DB, event orderEvent) error {
 
 	stored, lookupErr := loadOrder(ctx, db, order.ID)
 	if lookupErr == nil {
-		if stored.VoucherID == order.VoucherID && stored.UserID == order.UserID &&
-			(stored.Status == statusConfirmed || stored.Status == statusCancelled) {
-			return nil
-		}
-		return errOrderConflict
+		return matchFinalOrder(stored, order)
 	}
 	if !errors.Is(lookupErr, errOrderNotFound) {
 		return lookupErr
@@ -153,6 +143,14 @@ func persistOrder(ctx context.Context, db *gorm.DB, event orderEvent) error {
 		return errOrderConflict
 	}
 	return nil
+}
+
+func matchFinalOrder(stored, incoming Order) error {
+	if stored.VoucherID == incoming.VoucherID && stored.UserID == incoming.UserID &&
+		(stored.Status == statusConfirmed || stored.Status == statusCancelled) {
+		return nil
+	}
+	return errOrderConflict
 }
 
 func duplicateKey(err error) bool {

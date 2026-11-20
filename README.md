@@ -12,7 +12,10 @@ set -a
 . ./.env
 set +a
 docker compose up -d --wait
+# 应用数据库迁移后，在两个终端分别执行
 go run ./cmd/api
+# 另一个终端
+go run ./cmd/worker
 ```
 
 Compose 启动本地 MySQL、Redis 主节点、Redis 副本、三个 Redis Sentinel 和单节点 Kafka。默认只绑定本机，主节点端口为 `26379`，Sentinel 端口为 `26380`、`26381`、`26382`，其他端口分别为 `23306` 和 `29092`。MySQL 初始化 `hmdp` 空库。API 从进程环境变量读取配置，API 与 Compose 可以共用 `.env.example` 中的设置。连接独立服务时，可覆盖 `MYSQL_ADDR`、`REDIS_ADDR`、`REDIS_SENTINEL_ADDRS` 和逗号分隔的 `KAFKA_BROKERS`。
@@ -31,6 +34,8 @@ Compose 启动本地 MySQL、Redis 主节点、Redis 副本、三个 Redis Senti
 
 [阶段 6 秒杀监控与对账](docs/12-seckill-operations.md)记录 Prometheus、pprof、库存审计、Kafka 高可用配置和故障演练结果。
 
+[阶段 7 API 与 Worker 拆分](docs/13-split-api-worker.md)包含独立启动、部署回滚、备份恢复和持续压测。单进程联调可以运行 `go run ./cmd/all`。
+
 ## 验证 API
 
 ```bash
@@ -41,7 +46,7 @@ go vet ./...
 ```
 
 - `/health/live` 在 HTTP 进程可响应时返回 `200`，可先单独运行 API 来验证启动链路。
-- `/health/ready` 并行检查 MySQL Ping、Redis Ping 和 Kafka Broker 元数据。依赖全部可用时返回 `200`，有依赖不可用时返回 `503`，并在 `data.checks` 中标出对应组件。
+- API 的 `/health/ready` 检查 MySQL 和 Redis。Worker 的 `/health/ready` 默认在 `8081` 提供，并检查 Kafka 和后台任务启动状态。失败返回 `503`，`data.checks` 标出对应组件。
 - `Ctrl+C` 或 `SIGTERM` 会让 API 停止接收新连接，给正在处理的请求最多 10 秒完成，然后关闭客户端。
 - `docker compose down` 停止本地中间件并保留数据卷。
 
@@ -56,7 +61,7 @@ scripts/order-lifecycle-smoke.sh
 
 ## 从哪里读代码
 
-- [`cmd/api/main.go`](cmd/api/main.go) 读取环境配置，监听进程信号并启动应用。
+- [`cmd/api/main.go`](cmd/api/main.go) 与 [`cmd/worker/main.go`](cmd/worker/main.go) 分别启动 HTTP 和后台任务。
 - [`internal/app`](internal/app) 显式组装 GORM、go-redis、kafka-go 和 HTTP 服务。后续在这里注册各业务模块。
 - [`internal/user`](internal/user) 实现验证码、用户注册、会话和共用的鉴权中间件。
 - [`internal/platform/httpx`](internal/platform/httpx) 管理 JSON 响应、请求 ID、访问日志和 panic 恢复。

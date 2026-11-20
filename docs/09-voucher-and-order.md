@@ -28,7 +28,7 @@ docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL
 docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/006_order_lifecycle.sql
 docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/007_reservation_anomalies.sql
 docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/008_social.sql
-SHOP_ADMIN_USER_ID=7 VOUCHER_ADMIN_USER_ID=7 AUTH_DEV_LOG_CODES=true go run ./cmd/api
+SHOP_ADMIN_USER_ID=7 VOUCHER_ADMIN_USER_ID=7 AUTH_DEV_LOG_CODES=true go run ./cmd/all
 ```
 
 将示例里的 `7` 换成自己的用户 ID。用管理员 Token 创建活动，把 `shopId` 换成现有店铺 ID。

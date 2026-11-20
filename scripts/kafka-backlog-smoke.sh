@@ -82,7 +82,7 @@ PY
 compose exec -T kafka sh -c '/opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:9092 --topic hmdp.seckill.order.v1 --property parse.key=true' < "$work_dir/events.txt"
 
 started_at=$(date +%s)
-go run ./cmd/api >"$work_dir/api.log" 2>&1 &
+go run ./cmd/all >"$work_dir/api.log" 2>&1 &
 api_pid=$!
 for attempt in $(seq 1 60); do
     if curl -fsS --max-time 2 "http://$HTTP_ADDR/health/ready" >/dev/null 2>&1; then

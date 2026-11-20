@@ -56,7 +56,7 @@ docker compose exec -T redis redis-cli HSET login:token:demo-7 id 7
 docker compose exec -T redis redis-cli EXPIRE login:token:demo-7 600
 ```
 
-启动 `go run ./cmd/api` 后，等活动开始再发请求。将返回的 `data.orderId` 用在第二个请求中。
+启动 `go run ./cmd/all` 后，等活动开始再发请求。分进程启动方式见[阶段 7](13-split-api-worker.md)。将返回的 `data.orderId` 用在第二个请求中。
 
 ```bash
 curl -i -X POST -H 'Authorization: Bearer demo-7' http://127.0.0.1:8080/voucher-order/seckill/42

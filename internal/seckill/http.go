@@ -27,14 +27,15 @@ type Service struct {
 	logger         *slog.Logger
 	pendingTimeout time.Duration
 	outboxLimit    int
+	pendingLimit   int
 	metrics        *metrics
 }
 
-func New(db *gorm.DB, cache *redis.Client, logger *slog.Logger, pendingTimeout time.Duration, outboxLimit int) *Service {
+func New(db *gorm.DB, cache *redis.Client, logger *slog.Logger, pendingTimeout time.Duration, outboxLimit, pendingLimit int) *Service {
 	if pendingTimeout < time.Second {
 		pendingTimeout = 15 * time.Minute
 	}
-	return &Service{db: db, redis: cache, logger: logger, pendingTimeout: pendingTimeout, outboxLimit: outboxLimit}
+	return &Service{db: db, redis: cache, logger: logger, pendingTimeout: pendingTimeout, outboxLimit: outboxLimit, pendingLimit: pendingLimit}
 }
 
 func (s *Service) Register(router *gin.Engine, requireLogin gin.HandlerFunc) {
@@ -65,7 +66,7 @@ func (s *Service) submit(c *gin.Context) {
 	started := time.Now()
 	result, err := reserveStock.Run(ctx, s.redis,
 		[]string{key, key + ":buyers", orderKey(event.ID), outboxKey, timeoutKey, reservationBackupKey(event.ID)},
-		strconv.FormatUint(userID, 10), event.ID, payload, s.pendingTimeout.Milliseconds(), s.outboxLimit).StringSlice()
+		strconv.FormatUint(userID, 10), event.ID, payload, s.pendingTimeout.Milliseconds(), s.outboxLimit, s.pendingLimit).StringSlice()
 	if err != nil {
 		s.observe(started, "redis_reserve", "error")
 		s.unavailable(c, "reserve stock", err)
@@ -79,7 +80,7 @@ func (s *Service) submit(c *gin.Context) {
 	data := gin.H{"orderId": result[1]}
 	outcome := result[0]
 	switch outcome {
-	case "accepted", "duplicate", "missing", "closed", "sold_out", "overloaded":
+	case "accepted", "duplicate", "missing", "closed", "sold_out", "overloaded", "pending_overloaded":
 	default:
 		outcome = "error"
 	}
@@ -93,7 +94,7 @@ func (s *Service) submit(c *gin.Context) {
 		httpx.Respond(c, http.StatusNotFound, "activity unavailable", nil)
 	case "closed":
 		httpx.Respond(c, http.StatusConflict, "activity is outside its sale window", nil)
-	case "overloaded":
+	case "overloaded", "pending_overloaded":
 		c.Header("Retry-After", "1")
 		httpx.Respond(c, http.StatusServiceUnavailable, "seckill temporarily overloaded", nil)
 	case "sold_out":

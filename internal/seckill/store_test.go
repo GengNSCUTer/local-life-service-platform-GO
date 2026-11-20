@@ -4,12 +4,89 @@ import (
 	"context"
 	"crypto/rand"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
+
+func TestConcurrentConfirmationAndTimeoutKeepStockConsistent(t *testing.T) {
+	dsn := os.Getenv("HMDP_SECKILL_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set HMDP_SECKILL_TEST_DSN to an isolated database with migrations 001 and 006")
+	}
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	const stock = 24
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	activity := Activity{ID: uint64(now.UnixNano()), TotalStock: stock, RemainingStock: stock,
+		StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Minute)}
+	if err := createActivity(ctx, db, activity); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stop()
+		for _, query := range []string{
+			"DELETE r FROM seckill_order_resolutions r JOIN seckill_orders o ON o.id = r.order_id WHERE o.voucher_id = ?",
+			"DELETE FROM seckill_order_claims WHERE voucher_id = ?",
+			"DELETE FROM seckill_orders WHERE voucher_id = ?",
+			"DELETE FROM seckill_activities WHERE id = ?",
+		} {
+			if err := db.WithContext(cleanup).Exec(query, activity.ID).Error; err != nil {
+				t.Error(err)
+			}
+		}
+	}()
+	service := &Service{db: db}
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for i := range stock {
+		event := orderEvent{Version: 1, ID: rand.Text(), VoucherID: activity.ID, UserID: uint64(i + 1), CreatedAt: now}
+		workers.Go(func() {
+			<-start
+			if err := persistOrder(ctx, db, event); err != nil {
+				t.Errorf("confirm %s: %v", event.ID, err)
+			}
+		})
+		workers.Go(func() {
+			<-start
+			if _, err := service.cancelOrder(ctx, event, reasonPendingTimeout); err != nil {
+				t.Errorf("expire %s: %v", event.ID, err)
+			}
+		})
+	}
+	close(start)
+	workers.Wait()
+	var orders, confirmed, claims int64
+	for dest, query := range map[*int64]string{
+		&orders:    "SELECT COUNT(*) FROM seckill_orders WHERE voucher_id = ?",
+		&confirmed: "SELECT COUNT(*) FROM seckill_orders WHERE voucher_id = ? AND status = 'confirmed'",
+		&claims:    "SELECT COUNT(*) FROM seckill_order_claims WHERE voucher_id = ?",
+	} {
+		if err := db.WithContext(ctx).Raw(query, activity.ID).Row().Scan(dest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.WithContext(ctx).Table("seckill_activities").Take(&activity, "id = ?", activity.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if orders != stock || claims != confirmed || confirmed+int64(activity.RemainingStock) != stock {
+		t.Fatalf("orders=%d confirmed=%d claims=%d remaining=%d", orders, confirmed, claims, activity.RemainingStock)
+	}
+}
 
 func TestPersistOrderCanBeReplayedAfterStockReachesZero(t *testing.T) {
 	dsn := os.Getenv("HMDP_SECKILL_TEST_DSN")

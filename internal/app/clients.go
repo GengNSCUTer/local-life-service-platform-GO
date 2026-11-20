@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
+	"os"
 	"time"
 
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/config"
@@ -13,6 +15,7 @@ import (
 	"github.com/segmentio/kafka-go"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 type clients struct {
@@ -22,8 +25,8 @@ type clients struct {
 	kafkaTransport *kafka.Transport
 }
 
-func openClients(cfg config.Config) (*clients, error) {
-	if len(cfg.KafkaBrokers) == 0 {
+func openClients(cfg config.Config, withKafka bool) (*clients, error) {
+	if withKafka && len(cfg.KafkaBrokers) == 0 {
 		return nil, errors.New("KAFKA_BROKERS must contain at least one broker address")
 	}
 
@@ -41,20 +44,31 @@ func openClients(cfg config.Config) (*clients, error) {
 		return nil, fmt.Errorf("configure MySQL: %w", err)
 	}
 	pool := sql.OpenDB(connector)
-	pool.SetMaxOpenConns(20)
-	pool.SetMaxIdleConns(10)
+	maxConns := cfg.MySQLMaxOpenConns
+	if maxConns < 1 {
+		maxConns = 20
+	}
+	pool.SetMaxOpenConns(maxConns)
+	pool.SetMaxIdleConns(min(10, maxConns))
 	pool.SetConnMaxLifetime(5 * time.Minute)
 
 	// Readiness probes verify connectivity after the HTTP server starts.
 	db, err := gorm.Open(mysql.New(mysql.Config{
 		Conn:                      pool,
 		SkipInitializeWithVersion: true,
-	}), &gorm.Config{DisableAutomaticPing: true})
+	}), &gorm.Config{
+		DisableAutomaticPing: true,
+		Logger: logger.New(log.New(os.Stderr, "", log.LstdFlags), logger.Config{
+			SlowThreshold:             200 * time.Millisecond,
+			LogLevel:                  logger.Warn,
+			IgnoreRecordNotFoundError: true,
+			ParameterizedQueries:      true,
+		}),
+	})
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("initialize GORM: %w", err), pool.Close())
 	}
 
-	transport := &kafka.Transport{DialTimeout: 2 * time.Second}
 	redisOptions := &redis.FailoverOptions{
 		MasterName:            cfg.RedisMasterName,
 		SentinelAddrs:         cfg.RedisSentinels,
@@ -72,16 +86,18 @@ func openClients(cfg config.Config) (*clients, error) {
 			ContextTimeoutEnabled: true,
 		})
 	}
-	return &clients{
-		mysql:          db,
-		redis:          redisClient,
-		kafka:          &kafka.Client{Addr: kafka.TCP(cfg.KafkaBrokers...), Transport: transport},
-		kafkaTransport: transport,
-	}, nil
+	deps := &clients{mysql: db, redis: redisClient}
+	if withKafka {
+		deps.kafkaTransport = &kafka.Transport{DialTimeout: 2 * time.Second}
+		deps.kafka = &kafka.Client{Addr: kafka.TCP(cfg.KafkaBrokers...), Transport: deps.kafkaTransport}
+	}
+	return deps, nil
 }
 
 func (c *clients) close() error {
-	c.kafkaTransport.CloseIdleConnections()
+	if c.kafkaTransport != nil {
+		c.kafkaTransport.CloseIdleConnections()
+	}
 	pool, err := c.mysql.DB()
 	if err == nil {
 		err = pool.Close()
@@ -90,7 +106,7 @@ func (c *clients) close() error {
 }
 
 func (c *clients) probes() []healthProbe {
-	return []healthProbe{
+	probes := []healthProbe{
 		{name: "mysql", check: func(ctx context.Context) error {
 			pool, err := c.mysql.DB()
 			if err != nil {
@@ -101,7 +117,9 @@ func (c *clients) probes() []healthProbe {
 		{name: "redis", check: func(ctx context.Context) error {
 			return c.redis.Ping(ctx).Err()
 		}},
-		{name: "kafka", check: func(ctx context.Context) error {
+	}
+	if c.kafka != nil {
+		probes = append(probes, healthProbe{name: "kafka", check: func(ctx context.Context) error {
 			metadata, err := c.kafka.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{}})
 			if err != nil {
 				return err
@@ -110,6 +128,7 @@ func (c *clients) probes() []healthProbe {
 				return errors.New("Kafka returned no brokers")
 			}
 			return nil
-		}},
+		}})
 	}
+	return probes
 }

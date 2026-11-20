@@ -26,7 +26,7 @@ type metrics struct {
 	audits         *prometheus.CounterVec
 }
 
-func (s *Service) RegisterMetrics(reg prometheus.Registerer) {
+func (s *Service) RegisterMetrics(reg prometheus.Registerer, withWorkers bool) {
 	m := &metrics{
 		operations: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "hmdp_seckill_operation_duration_seconds", Help: "Seconds spent on each seckill operation, by outcome.",
@@ -54,7 +54,12 @@ func (s *Service) RegisterMetrics(reg prometheus.Registerer) {
 			Name: "hmdp_seckill_inventory_checks_total", Help: "Completed inventory checks by status.",
 		}, []string{"status"}),
 	}
-	reg.MustRegister(m.operations, m.retries, m.workers, m.queues, m.outboxDueDelay, m.lag, m.fresh, m.audits)
+	reg.MustRegister(m.operations)
+	s.metrics = m
+	if !withWorkers {
+		return
+	}
+	reg.MustRegister(m.retries, m.workers, m.queues, m.outboxDueDelay, m.lag, m.fresh, m.audits)
 	for _, source := range []string{"redis", "kafka", "inventory"} {
 		m.fresh.WithLabelValues(source).Set(0)
 	}
@@ -62,7 +67,6 @@ func (s *Service) RegisterMetrics(reg prometheus.Registerer) {
 		m.audits.WithLabelValues(status).Add(0)
 	}
 	m.operations.WithLabelValues("mysql_dlq_audit", "manual_review")
-	s.metrics = m
 }
 
 func (s *Service) observe(start time.Time, operation, outcome string) {

@@ -99,6 +99,7 @@ compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" 
 voucher_id=$(date +%s%N)
 ends_at=$(date -u -d '+15 minutes' +%FT%TZ)
 go build -o "$work_dir/api" ./cmd/api
+go build -o "$work_dir/all" ./cmd/all
 starts_at=$(date -u -d '+6 seconds' +%FT%TZ)
 "$work_dir/api" prepare-seckill -voucher-id "$voucher_id" -stock 5 -starts-at "$starts_at" -ends-at "$ends_at"
 
@@ -108,7 +109,7 @@ for user_id in 940001 940002 940003 940004; do
     redis_exec EXPIRE "login:token:$token" 600 >/dev/null
 done
 
-"$work_dir/api" >"$work_dir/api.log" 2>&1 &
+"$work_dir/all" >"$work_dir/api.log" 2>&1 &
 api_pid=$!
 for attempt in $(seq 1 60); do
     if curl -fsS --max-time 2 "http://$HTTP_ADDR/health/ready" >/dev/null 2>&1; then

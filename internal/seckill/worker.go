@@ -36,7 +36,7 @@ func CreateTopics(ctx context.Context, client *kafka.Client) error {
 
 // RunWorkers returns after all loops and their Kafka clients have stopped.
 func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafka.Client, transport *kafka.Transport,
-	relayWorkers, consumerWorkers int) error {
+	relayWorkers, consumerWorkers int, started func()) error {
 	var workers sync.WaitGroup
 	workers.Go(func() { s.measuredWorker("expiration", func() { s.expireReservations(ctx) }) })
 	workers.Go(func() { s.measuredWorker("compensation", func() { s.reconcileResolutions(ctx) }) })
@@ -74,6 +74,7 @@ func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafk
 		StartOffset: kafka.FirstOffset, MaxWait: time.Second,
 	})
 	workers.Go(func() { s.measuredWorker("dlq", func() { s.reconcile(ctx, dlqReader) }) })
+	started()
 	workers.Wait()
 	closeErrs := []error{dlqReader.Close(), writer.Close()}
 	for _, reader := range readers {

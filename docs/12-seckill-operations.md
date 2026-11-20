@@ -1,6 +1,6 @@
 # 阶段 6 · 秒杀监控、对账和高可用演练
 
-秒杀仍在模块化单体内运行。HTTP 请求通过 Redis Lua 预占，Relay 把 Redis outbox 的事件发给 Kafka，Consumer 完成 MySQL 事务后提交消费位置。监控贯穿这些步骤，库存审计和订单补偿各自运行。
+阶段 6 的秒杀在模块化单体内运行。独立运行 API 和 Worker 见[阶段 7](13-split-api-worker.md)。HTTP 请求通过 Redis Lua 预占，Relay 把 Redis outbox 的事件发给 Kafka，Consumer 完成 MySQL 事务后提交消费位置。监控贯穿这些步骤，库存审计和订单补偿各自运行。
 
 ```mermaid
 flowchart LR
@@ -21,7 +21,7 @@ flowchart LR
 ## 监控与 Go 源码
 
 ```bash
-OBSERVABILITY_ADDR=127.0.0.1:9091 PPROF_ENABLED=true go run ./cmd/api
+OBSERVABILITY_ADDR=127.0.0.1:9091 PPROF_ENABLED=true go run ./cmd/all
 curl -fsS http://127.0.0.1:9091/metrics
 curl -fsS http://127.0.0.1:9091/debug/pprof/goroutine?debug=1
 curl -fsS 'http://127.0.0.1:9091/debug/pprof/profile?seconds=20' -o /tmp/hmdp-cpu.pprof

@@ -62,7 +62,7 @@ mysql_exec "INSERT INTO seckill_order_claims (voucher_id, user_id, order_id, cre
 compose exec -T redis redis-cli HSET login:token:compensation-user id 930001 >/dev/null
 compose exec -T redis redis-cli EXPIRE login:token:compensation-user 600 >/dev/null
 
-go run ./cmd/api >"$work_dir/api.log" 2>&1 &
+go run ./cmd/all >"$work_dir/api.log" 2>&1 &
 api_pid=$!
 for attempt in $(seq 1 60); do
     if curl -fsS --max-time 2 "http://$HTTP_ADDR/health/ready" >/dev/null 2>&1; then

@@ -10,10 +10,12 @@ import (
 
 type Config struct {
 	HTTPAddr               string
+	WorkerHealthAddr       string
 	ObservabilityAddr      string
 	PprofEnabled           bool
 	InventoryAuditInterval time.Duration
 	SeckillOutboxLimit     int
+	SeckillPendingLimit    int
 	AuthDevLogCodes        bool
 	ShopAdminUserID        uint64
 	VoucherAdminUserID     uint64
@@ -21,6 +23,7 @@ type Config struct {
 	MySQLUser              string
 	MySQLPassword          string
 	MySQLDatabase          string
+	MySQLMaxOpenConns      int
 	RedisAddr              string
 	RedisPassword          string
 	RedisSentinels         []string
@@ -57,10 +60,12 @@ func Load() Config {
 	}
 	return Config{
 		HTTPAddr:               env("HTTP_ADDR", "127.0.0.1:8080"),
+		WorkerHealthAddr:       env("WORKER_HEALTH_ADDR", "127.0.0.1:8081"),
 		ObservabilityAddr:      env("OBSERVABILITY_ADDR", ""),
 		PprofEnabled:           pprofEnabled,
 		InventoryAuditInterval: durationEnv("SECKILL_AUDIT_INTERVAL", time.Minute),
 		SeckillOutboxLimit:     positiveIntEnv("SECKILL_OUTBOX_LIMIT", 0),
+		SeckillPendingLimit:    positiveIntEnv("SECKILL_PENDING_LIMIT", 0),
 		AuthDevLogCodes:        authDevLogCodes,
 		ShopAdminUserID:        shopAdminUserID,
 		VoucherAdminUserID:     voucherAdminUserID,
@@ -68,6 +73,7 @@ func Load() Config {
 		MySQLUser:              env("MYSQL_USER", "hmdp"),
 		MySQLPassword:          env("MYSQL_PASSWORD", "hmdp_dev_mysql"),
 		MySQLDatabase:          env("MYSQL_DATABASE", "hmdp"),
+		MySQLMaxOpenConns:      positiveIntEnv("MYSQL_MAX_OPEN_CONNS", 20),
 		RedisAddr:              env("REDIS_ADDR", localAddr("REDIS_PORT", "26379")),
 		RedisPassword:          env("REDIS_PASSWORD", "hmdp_dev_redis"),
 		RedisSentinels:         sentinels,

@@ -18,9 +18,18 @@ import (
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/voucher"
 )
 
-// Run owns the HTTP server and shared clients for the lifetime of the process.
-func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr error) {
-	deps, err := openClients(cfg)
+// Run keeps the original single-process mode for local regression tests.
+func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
+	return runAPI(ctx, cfg, logger, true)
+}
+
+// RunAPI starts only the HTTP process. Background workers are owned by RunWorker.
+func RunAPI(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
+	return runAPI(ctx, cfg, logger, false)
+}
+
+func runAPI(ctx context.Context, cfg config.Config, logger *slog.Logger, startWorkers bool) (runErr error) {
+	deps, err := openClients(cfg, startWorkers)
 	if err != nil {
 		return err
 	}
@@ -42,8 +51,8 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 	}
 	defer func() { runErr = errors.Join(runErr, stopDiagnostics()) }()
 
-	service := seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout, cfg.SeckillOutboxLimit)
-	service.RegisterMetrics(registry)
+	service := seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout, cfg.SeckillOutboxLimit, cfg.SeckillPendingLimit)
+	service.RegisterMetrics(registry, startWorkers)
 	router := newRouter(logger, deps.probes(), observe.HTTP(registry))
 	users := user.New(deps.mysql, deps.redis, logger, cfg.AuthDevLogCodes)
 	users.Register(router)
@@ -53,27 +62,14 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 	voucher.New(deps.mysql, logger, cfg.VoucherAdminUserID, service).Register(router, requireLogin)
 	community := social.New(deps.mysql, deps.redis, logger)
 	community.Register(router, requireLogin, users.OptionalLogin())
-	workerCtx, stopWorkers := context.WithCancel(context.WithoutCancel(ctx))
-	workersDone := make(chan error, 3)
-	go func() {
-		workersDone <- community.RunWorkers(workerCtx, cfg.KafkaBrokers, deps.kafka, deps.kafkaTransport)
-	}()
-	go func() {
-		workersDone <- service.RunWorkers(workerCtx, cfg.KafkaBrokers, deps.kafka, deps.kafkaTransport,
-			cfg.KafkaRelayWorkers, cfg.KafkaConsumerWorkers)
-	}()
-	go func() {
-		service.RunMonitoring(workerCtx, deps.kafka, cfg.InventoryAuditInterval)
-		workersDone <- nil
-	}()
-	defer func() {
-		stopWorkers()
-		for range 3 {
-			if err := <-workersDone; err != nil {
-				runErr = errors.Join(runErr, fmt.Errorf("close background workers: %w", err))
-			}
-		}
-	}()
+	if startWorkers {
+		workerCtx, stop := context.WithCancel(context.WithoutCancel(ctx))
+		done := startBackground(workerCtx, cfg, deps, service, community, func() {})
+		defer func() {
+			stop()
+			runErr = errors.Join(runErr, waitBackground(done, backgroundLoops))
+		}()
+	}
 	server := &http.Server{
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -108,7 +104,7 @@ func Run(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr er
 }
 
 func PrepareSeckill(ctx context.Context, cfg config.Config, logger *slog.Logger, activity seckill.Activity) (prepareErr error) {
-	deps, err := openClients(cfg)
+	deps, err := openClients(cfg, true)
 	if err != nil {
 		return err
 	}
@@ -116,14 +112,14 @@ func PrepareSeckill(ctx context.Context, cfg config.Config, logger *slog.Logger,
 	if err := seckill.CreateTopics(ctx, deps.kafka); err != nil {
 		return fmt.Errorf("prepare Kafka topics: %w", err)
 	}
-	return seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout, cfg.SeckillOutboxLimit).Prepare(ctx, activity)
+	return seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout, cfg.SeckillOutboxLimit, cfg.SeckillPendingLimit).Prepare(ctx, activity)
 }
 
 func AuditSeckill(ctx context.Context, cfg config.Config, logger *slog.Logger, voucherID uint64) (_ seckill.InventoryAudit, auditErr error) {
-	deps, err := openClients(cfg)
+	deps, err := openClients(cfg, false)
 	if err != nil {
 		return seckill.InventoryAudit{}, err
 	}
 	defer func() { auditErr = errors.Join(auditErr, deps.close()) }()
-	return seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout, cfg.SeckillOutboxLimit).AuditInventory(ctx, voucherID)
+	return seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout, cfg.SeckillOutboxLimit, cfg.SeckillPendingLimit).AuditInventory(ctx, voucherID)
 }

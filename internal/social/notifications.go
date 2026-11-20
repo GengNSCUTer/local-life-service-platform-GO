@@ -22,7 +22,7 @@ type publishedBlog struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
-func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafka.Client, transport *kafka.Transport) error {
+func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafka.Client, transport *kafka.Transport, started func()) error {
 	for ctx.Err() == nil {
 		operation, cancel := context.WithTimeout(ctx, 3*time.Second)
 		result, err := client.CreateTopics(operation, &kafka.CreateTopicsRequest{Topics: []kafka.TopicConfig{
@@ -50,6 +50,7 @@ func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafk
 	var workers sync.WaitGroup
 	workers.Go(func() { s.relay(ctx, writer) })
 	workers.Go(func() { s.consume(ctx, reader) })
+	started()
 	workers.Wait()
 	return errors.Join(reader.Close(), writer.Close())
 }

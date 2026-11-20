@@ -1,0 +1,26 @@
+# Linux host networking shares the loopback endpoints of the local middleware.
+services:
+  api:
+    build:
+      context: .
+      target: api
+    network_mode: host
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HTTP_ADDR: ${HTTP_ADDR:-127.0.0.1:8080}
+      OBSERVABILITY_ADDR: ${API_OBSERVABILITY_ADDR:-127.0.0.1:9091}
+    stop_grace_period: 20s
+  worker:
+    build:
+      context: .
+      target: worker
+    network_mode: host
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      WORKER_HEALTH_ADDR: ${WORKER_HEALTH_ADDR:-127.0.0.1:8081}
+      OBSERVABILITY_ADDR: ${WORKER_OBSERVABILITY_ADDR:-127.0.0.1:9092}
+    stop_grace_period: 45s

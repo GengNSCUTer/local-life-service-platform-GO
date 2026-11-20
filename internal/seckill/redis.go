@@ -58,6 +58,10 @@ local limit = tonumber(ARGV[5]) or 0
 if limit > 0 and redis.call('ZCARD', KEYS[4]) >= limit then
     return {'overloaded', ''}
 end
+local pending_limit = tonumber(ARGV[6]) or 0
+if pending_limit > 0 and redis.call('ZCARD', KEYS[5]) >= pending_limit then
+    return {'pending_overloaded', ''}
+end
 if redis.call('EXISTS', KEYS[3]) == 1 then
     return redis.error_reply('order ID collision')
 end

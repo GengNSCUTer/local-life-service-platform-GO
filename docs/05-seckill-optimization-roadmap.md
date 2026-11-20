@@ -129,9 +129,7 @@
 
 ### 5. 拆分 API 和 Seckill Worker
 
-当前 API、Relay、订单 Consumer 和 DLQ Reconciler 在同一个 Go 进程内运行。
-
-后续可以拆成：
+阶段 7 将 API 与后台任务拆成独立的 Go 进程，部署和验收见[阶段 7](13-split-api-worker.md)。
 
 ```text
 API Service

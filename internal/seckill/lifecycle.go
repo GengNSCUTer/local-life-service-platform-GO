@@ -35,6 +35,16 @@ func (s *Service) cancelOrder(ctx context.Context, event orderEvent, reason stri
 	var cancelled Order
 	for attempt := 0; attempt < 3; attempt++ {
 		err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			// Both paths lock the activity before inserting or updating an order.
+			var activity Activity
+			lock := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("seckill_activities").Select("id").
+				Take(&activity, "id = ?", event.VoucherID).Error
+			if errors.Is(lock, gorm.ErrRecordNotFound) {
+				return errOrderNotFound
+			}
+			if lock != nil {
+				return lock
+			}
 			var existing Order
 			err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("seckill_orders").
 				Take(&existing, "id = ?", event.ID).Error
