@@ -1,6 +1,8 @@
 # Local Life Service Platform Go
 
-这是本地生活服务平台的 Go 重构项目。Java 版提供业务和 API 参考，Go 版从模块化单体起步。首个业务模块使用 Redis Lua 预占秒杀库存，后台投递 Kafka 订单事件，消费者通过 MySQL 事务落单。
+这是本地生活服务平台的 Go 重构项目。Java 版提供业务和 API 参考，Go 版从模块化单体起步。提供用户、店铺、优惠券、秒杀订单和探店社交五个模块。API 和异步 Worker 可以独立运行。
+
+业务范围、架构图和源码学习路线见[项目总览](docs/15-project-overview.md)。
 
 ## 运行开发环境
 
@@ -35,6 +37,8 @@ Compose 启动本地 MySQL、Redis 主节点、Redis 副本、三个 Redis Senti
 [阶段 6 秒杀监控与对账](docs/12-seckill-operations.md)记录 Prometheus、pprof、库存审计、Kafka 高可用配置和故障演练结果。
 
 [阶段 7 API 与 Worker 拆分](docs/13-split-api-worker.md)包含独立启动、部署回滚、备份恢复和持续压测。单进程联调可以运行 `go run ./cmd/all`。
+
+[阶段 8 容量与发布](docs/14-capacity-and-release.md)记录容量测量、生产演练方案和上线回滚步骤。
 
 ## 验证 API
 

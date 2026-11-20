@@ -29,30 +29,35 @@ def submit(port, voucher, prefix, sequence):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--port', type=int, default=8080)
+    parser.add_argument('--port', type=int, action='append', help='loopback API port, repeat to distribute requests')
     parser.add_argument('--voucher', type=int, required=True)
     parser.add_argument('--seconds', type=int, default=3660)
     parser.add_argument('--rate', type=int, default=10)
     parser.add_argument('--prefix', default='soak-')
     args = parser.parse_args()
-    if not 1 <= args.port <= 65535 or min(args.voucher, args.seconds, args.rate) < 1:
+    ports = args.port or [8080]
+    if any(not 1 <= port <= 65535 for port in ports) or min(args.voucher, args.seconds, args.rate) < 1:
         parser.error('provide positive values and a valid port')
 
     latencies = []
     errors = 0
     first_error = None
+    accepted_by_port = dict.fromkeys(ports, 0)
+
+    def send(sequence):
+        port = ports[(sequence - 1) % len(ports)]
+        return port, submit(port, args.voucher, args.prefix, sequence)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.rate) as pool:
         started = time.monotonic()
         for second in range(args.seconds):
             time.sleep(max(0, started + second - time.monotonic()))
             first = second * args.rate + 1
-            results = pool.map(
-                lambda sequence: submit(args.port, args.voucher, args.prefix, sequence),
-                range(first, first + args.rate),
-            )
-            for elapsed, error in results:
+            for port, (elapsed, error) in pool.map(send, range(first, first + args.rate)):
                 latencies.append(elapsed)
-                if error is not None:
+                if error is None:
+                    accepted_by_port[port] += 1
+                else:
                     errors += 1
                     if first_error is None:
                         first_error = error
@@ -63,7 +68,8 @@ def main():
     percentile = latencies[math.ceil(len(latencies) * .99) - 1]
     print(json.dumps({'seconds': round(time.monotonic() - started, 3),
                       'requests': len(latencies), 'accepted': len(latencies) - errors,
-                      'errors': errors, 'firstError': first_error, 'p99Ms': round(percentile, 2)}), flush=True)
+                      'errors': errors, 'firstError': first_error, 'p99Ms': round(percentile, 2),
+                      'acceptedByPort': accepted_by_port}), flush=True)
     return int(errors > 0)
 
 
