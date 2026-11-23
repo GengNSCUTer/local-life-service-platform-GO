@@ -69,7 +69,7 @@ cleanup() {
         stop "$mysql_pid" || true
     fi
     if [[ "$mode" == catalog || "$mode" == orders || "$mode" == worker-scale ]]; then
-        rm -rf -- "$work/source" "$work/kafka-logs" "$work/api" "$work/worker"
+        rm -rf -- "$work/source" "$work/kafka-logs" "$work/api" "$work/worker" "$work/seckill-bench"
     fi
 }
 trap cleanup EXIT
@@ -111,7 +111,12 @@ start_mysql() {
 run_mysql() {
     local -a options=()
     if [[ "$mode" == orders || "$mode" == worker-scale ]]; then
-        options+=(--innodb-buffer-pool-size=1G --innodb-flush-log-at-trx-commit=2 --sync-binlog=0)
+        options+=(--innodb-buffer-pool-size=1G)
+        if [[ "$mode" == orders && ${ORDER_TEST_DURABLE:-0} == 1 ]]; then
+            options+=(--innodb-flush-log-at-trx-commit=1 --sync-binlog=1)
+        else
+            options+=(--innodb-flush-log-at-trx-commit=2 --sync-binlog=0)
+        fi
     fi
     "$MYSQL_BIN_DIR/mysqld" --no-defaults "${options[@]}" --basedir="$(dirname -- "$MYSQL_BIN_DIR")" --datadir="$1" --bind-address=127.0.0.1 --port="$((port+1))" --mysqlx=OFF --socket="$work/mysql.sock" --pid-file="$work/mysql.pid" >>"$work/mysql.log" 2>&1 & mysql_pid=$!
     for attempt in $(seq 1 120); do
