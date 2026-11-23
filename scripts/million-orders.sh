@@ -53,9 +53,11 @@ PY
             SELECT (SELECT COUNT(*) FROM seckill_orders),
                    (SELECT COUNT(*) FROM seckill_orders WHERE status='confirmed'),
                    (SELECT COUNT(*) FROM seckill_orders WHERE status='cancelled'),
-                   (SELECT SUM(remaining_stock) FROM seckill_activities)")
-        outbox=$("${redis[@]}" ZCARD 'seckill:{orders}:outbox')
-        pending=$("${redis[@]}" ZCARD 'seckill:{orders}:timeouts')
+                   (SELECT COALESCE(SUM(remaining_stock), 0) FROM seckill_activities WHERE stock_buckets=0) +
+                   (SELECT COALESCE(SUM(remaining_stock), 0) FROM seckill_stock_buckets)")
+        local queues
+        queues=$(order_test_queues "$first" "$activities")
+        read -r outbox pending <<< "$queues"
         curl -fsS --max-time 5 "http://127.0.0.1:$((port+7))/metrics" > "$work/orders-worker.prom"
         kafka_lag=$(awk -v expected="$partitions" '/^hmdp_seckill_kafka_lag\{.*topic="hmdp.seckill.order.v1"/ {n++; sum+=$2}
             END {if (n==expected) print sum; else print "NA"}' "$work/orders-worker.prom")
@@ -81,7 +83,8 @@ PY
     summary=$("${mysql[@]}" -BN "$MYSQL_DATABASE" -e "
         SELECT (SELECT COUNT(*) FROM seckill_orders), (SELECT COUNT(*) FROM seckill_order_claims),
         (SELECT COUNT(*) FROM seckill_dead_letters), (SELECT COUNT(*) FROM seckill_reservation_anomalies),
-        (SELECT COUNT(*) FROM seckill_activities WHERE remaining_stock=0),
+        (SELECT COUNT(*) FROM seckill_activities a WHERE (CASE WHEN a.stock_buckets=0 THEN a.remaining_stock ELSE
+         (SELECT SUM(b.remaining_stock) FROM seckill_stock_buckets b WHERE b.voucher_id=a.id) END)=0),
         (SELECT COUNT(*) FROM seckill_orders o LEFT JOIN tb_user u ON u.id=o.user_id WHERE u.id IS NULL)")
     printf 'orders\tclaims\tdead_letters\tanomalies\tempty_activities\tunknown_users\n%s\n' "$summary" | tee "$work/orders-summary.tsv"
     [[ "$summary" == "$total"$'\t'"$total"$'\t0\t0\t'"$activities"$'\t0' ]]
@@ -106,7 +109,41 @@ PY
         voucher_id=$((first+index))
         assert_inventory "$users" "$work/audit-$voucher_id.json"
     done > "$work/orders-audits.log"
+    if [[ ${ORDER_TEST_LIFECYCLE:-0} == 1 ]]; then
+        order_test_lifecycle "$first" "$users"
+    fi
     printf 'PASS %s confirmed orders and %s consistent activity audits\n' "$total" "$activities"
+}
+
+order_test_lifecycle() {
+    local first=$1 stock=$2 order pending replacement restored attempt voucher_id=$1
+    order=$("${mysql[@]}" -BN "$MYSQL_DATABASE" -e "SELECT id FROM seckill_orders WHERE voucher_id=$first AND user_id=1 AND status='confirmed'")
+    [[ $(status 1 "$order") == confirmed ]]
+    stop "$worker_pid"; worker_pid=
+    cancel_order() {
+        curl -fsS --max-time 6 -X POST -H 'Authorization: Bearer stage7-1' "http://$HTTP_ADDR/voucher-order/$1/cancel" |
+            python3 -c 'import json,sys; r=json.load(sys.stdin)["data"]; assert r["order"]["status"]=="cancelled" and not r["compensationPending"], r'
+    }
+    cancel_order "$order"
+    cancel_order "$order"
+    [[ $(status 1 "$order") == cancelled ]]
+    restored=$("${mysql[@]}" -BN "$MYSQL_DATABASE" -e "SELECT CASE WHEN a.stock_buckets=0 THEN a.remaining_stock ELSE
+      (SELECT SUM(b.remaining_stock) FROM seckill_stock_buckets b WHERE b.voucher_id=a.id) END FROM seckill_activities a WHERE a.id=$first")
+    [[ "$restored" == 1 ]]
+    pending=$(submit "$HTTP_ADDR" 1)
+    [[ $(status 1 "$pending") == pending ]]
+    cancel_order "$pending"
+    [[ $(status 1 "$pending") == cancelled ]]
+    replacement=$(submit "$HTTP_ADDR" 1)
+    [[ "$replacement" != "$pending" && "$pending" != "$order" ]]
+    start_worker
+    for attempt in $(seq 1 60); do
+        if [[ $(status 1 "$replacement") == confirmed ]]; then break; fi
+        sleep .5
+    done
+    [[ $(status 1 "$replacement") == confirmed ]]
+    assert_inventory "$stock" "$work/lifecycle-audit.json"
+    printf 'PASS confirmed cancellation, idempotent refund, pending cancellation and reorder\n'
 }
 
 order_test_lock_stats() {
@@ -114,4 +151,35 @@ order_test_lock_stats() {
         MAX(IF(VARIABLE_NAME='Innodb_row_lock_time', VARIABLE_VALUE+0, NULL))
         FROM performance_schema.global_status
         WHERE VARIABLE_NAME IN ('Innodb_row_lock_waits', 'Innodb_row_lock_time')"
+}
+
+order_test_queues() {
+    local first=$1 activities=$2 offset shard prefix queue count total
+    local -a prefixes=('seckill:{orders}:') command=("${redis[@]}")
+    local -A seen=()
+    if [[ ${SECKILL_REDIS_SHARDED:-false} == true ]]; then
+        prefixes=()
+        if [[ -n ${SECKILL_REDIS_CLUSTER_ADDRS:-} ]]; then
+            local seed=${SECKILL_REDIS_CLUSTER_ADDRS%%,*}
+            command=("$redis_bin/redis-cli" --raw -e -c -h "${seed%:*}" -p "${seed##*:}")
+        fi
+        for ((offset=0; offset<activities; offset++)); do
+            shard=$(((first+offset)%16+1))
+            if [[ -z ${seen[$shard]:-} ]]; then
+                printf -v prefix 'seckill:{orders:v2:%02d}:' "$shard"
+                prefixes+=("$prefix")
+                seen[$shard]=1
+            fi
+        done
+    fi
+    for queue in outbox timeouts; do
+        total=0
+        for prefix in "${prefixes[@]}"; do
+            count=$("${command[@]}" ZCARD "$prefix$queue") || return
+            [[ "$count" =~ ^[0-9]+$ ]] || return 1
+            total=$((total+count))
+        done
+        printf '%d ' "$total"
+    done
+    printf '\n'
 }

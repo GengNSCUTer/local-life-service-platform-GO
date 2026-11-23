@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -38,7 +39,10 @@ func CreateTopics(ctx context.Context, client *kafka.Client) error {
 func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafka.Client, transport *kafka.Transport,
 	relayWorkers, consumerWorkers int, started func()) error {
 	var workers sync.WaitGroup
-	workers.Go(func() { s.measuredWorker("expiration", func() { s.expireReservations(ctx) }) })
+	s.refreshRoutes(ctx)
+	workers.Go(func() { s.watchRoutes(ctx) })
+	var relayCursor, timeoutCursor atomic.Uint64
+	workers.Go(func() { s.measuredWorker("expiration", func() { s.expireReservations(ctx, &timeoutCursor) }) })
 	workers.Go(func() { s.measuredWorker("compensation", func() { s.reconcileResolutions(ctx) }) })
 	if !s.retry(ctx, "provision topics", func(operation context.Context) error {
 		return CreateTopics(operation, client)
@@ -59,7 +63,7 @@ func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafk
 	}
 	readers := make([]*kafka.Reader, 0, consumerWorkers)
 	for i := 0; i < relayWorkers; i++ {
-		workers.Go(func() { s.measuredWorker("relay", func() { s.relay(ctx, writer) }) })
+		workers.Go(func() { s.measuredWorker("relay", func() { s.relay(ctx, writer, &relayCursor) }) })
 	}
 	for i := 0; i < consumerWorkers; i++ {
 		reader := kafka.NewReader(kafka.ReaderConfig{
@@ -83,10 +87,10 @@ func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafk
 	return errors.Join(closeErrs...)
 }
 
-func (s *Service) relay(ctx context.Context, writer *kafka.Writer) {
+func (s *Service) relay(ctx context.Context, writer *kafka.Writer, cursor *atomic.Uint64) {
 	for ctx.Err() == nil {
 		operation, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		err := s.publishNext(operation, writer)
+		err := s.pollQueues(operation, cursor, func(shard redisShard) error { return s.publishOnShard(operation, writer, shard) })
 		cancel()
 		switch {
 		case err == nil:
@@ -101,14 +105,40 @@ func (s *Service) relay(ctx context.Context, writer *kafka.Writer) {
 	}
 }
 
-func (s *Service) publishNext(ctx context.Context, writer *kafka.Writer) error {
-	id, err := claimDue.Run(ctx, s.redis, []string{outboxKey}, 15000).Text()
+// Rotate the starting shard across pollers. An empty or unavailable shard does not stop other queues.
+func (s *Service) pollQueues(ctx context.Context, cursor *atomic.Uint64, poll func(redisShard) error) error {
+	routes := s.routes()
+	start := int((cursor.Add(1) - 1) % uint64(len(routes)))
+	var firstErr error
+	for i := range routes {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := poll(routes[(start+i)%len(routes)])
+		if err == nil {
+			return nil
+		}
+		if firstErr == nil && !errors.Is(err, redis.Nil) {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		return firstErr
+	}
+	return redis.Nil
+}
+
+func (s *Service) publishOnShard(ctx context.Context, writer *kafka.Writer, shard redisShard) error {
+	// Leave time to try another shard if this slot's primary is unavailable.
+	claimCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	id, err := claimDue.Run(claimCtx, s.redisFor(shard), []string{shard.outbox()}, 15000).Text()
+	cancel()
 	if err != nil {
 		return err
 	}
 	_, payload, err := s.reservation(ctx, id)
 	if errors.Is(err, errUnreadableReservation) {
-		return s.retireUnreadableReservation(ctx, id)
+		return s.retireUnreadableReservation(ctx, shard, id)
 	}
 	if err != nil {
 		return fmt.Errorf("load outbox event %s: %w", id, err)
@@ -120,13 +150,13 @@ func (s *Service) publishNext(ctx context.Context, writer *kafka.Writer) error {
 		return fmt.Errorf("publish order %s: %w", id, err)
 	}
 	// If the broker accepted the event but removal fails, a later claim republishes it.
-	return s.redis.ZRem(ctx, outboxKey, id).Err()
+	return s.redisFor(shard).ZRem(ctx, shard.outbox(), id).Err()
 }
 
-func (s *Service) expireReservations(ctx context.Context) {
+func (s *Service) expireReservations(ctx context.Context, cursor *atomic.Uint64) {
 	for ctx.Err() == nil {
 		operation, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		err := s.expireNext(operation)
+		err := s.pollQueues(operation, cursor, func(shard redisShard) error { return s.expireOnShard(operation, shard) })
 		cancel()
 		switch {
 		case err == nil:
@@ -141,14 +171,16 @@ func (s *Service) expireReservations(ctx context.Context) {
 	}
 }
 
-func (s *Service) expireNext(ctx context.Context) error {
-	id, err := claimDue.Run(ctx, s.redis, []string{timeoutKey}, 15000).Text()
+func (s *Service) expireOnShard(ctx context.Context, shard redisShard) error {
+	claimCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	id, err := claimDue.Run(claimCtx, s.redisFor(shard), []string{shard.timeouts()}, 15000).Text()
+	cancel()
 	if err != nil {
 		return err
 	}
 	event, _, err := s.reservation(ctx, id)
 	if errors.Is(err, errUnreadableReservation) {
-		return s.retireUnreadableReservation(ctx, id)
+		return s.retireUnreadableReservation(ctx, shard, id)
 	}
 	if err != nil {
 		return err
@@ -164,7 +196,7 @@ func (s *Service) expireNext(ctx context.Context) error {
 	return err
 }
 
-func (s *Service) retireUnreadableReservation(ctx context.Context, id string) error {
+func (s *Service) retireUnreadableReservation(ctx context.Context, shard redisShard, id string) error {
 	_, err := loadOrder(ctx, s.db, id)
 	if errors.Is(err, errOrderNotFound) {
 		if err := s.db.WithContext(ctx).Exec(`
@@ -178,7 +210,7 @@ func (s *Service) retireUnreadableReservation(ctx context.Context, id string) er
 		return err
 	}
 	// Remove the queue entries only after preserving the audit record or finding a stored order.
-	return s.finalize(ctx, id)
+	return s.finalizeOnShard(ctx, shard, id)
 }
 
 func (s *Service) reconcileResolutions(ctx context.Context) {

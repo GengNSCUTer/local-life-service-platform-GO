@@ -28,7 +28,7 @@ Compose 启动本地 MySQL、Redis 主节点、Redis 副本、三个 Redis Senti
 
 创建普通券和秒杀活动、预热库存与查询订单历史见[优惠券、活动和订单查询](docs/09-voucher-and-order.md)。
 
-订单取消、pending 超时、补偿重试和异常订单处理见[秒杀订单生命周期](docs/10-order-lifecycle.md)。新库按顺序执行 `001` 到 `009`。已有阶段 5 数据库升级时应用 `009_inventory_audits.sql`。
+订单取消、pending 超时、补偿重试和异常订单处理见[秒杀订单生命周期](docs/10-order-lifecycle.md)。新库按顺序执行 `001` 到 `010`。已有 v1 数据库先应用 `010_seckill_shards.sql`。新活动可按配置启用[Redis 活动分片和 MySQL 库存桶](docs/18-seckill-sharding.md)。
 
 百万和千万请求的复现命令与测量口径见[秒杀接口压测](docs/04-seckill-benchmark.md)。
 

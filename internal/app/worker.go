@@ -52,7 +52,7 @@ func RunWorker(ctx context.Context, cfg config.Config, logger *slog.Logger) (run
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(listener) }()
 
-	service := seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout, cfg.SeckillOutboxLimit, cfg.SeckillPendingLimit)
+	service := deps.seckillService(cfg, logger)
 	service.RegisterMetrics(registry, true)
 	community := social.New(deps.mysql, deps.redis, logger)
 	workerCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))

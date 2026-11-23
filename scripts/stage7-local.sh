@@ -8,14 +8,27 @@ redis_bin=${REDIS_BIN_DIR:-/usr/bin}
 mode=${1:-restore}
 case "$mode" in restore|soak|capacity|catalog|orders|worker-scale) ;; *) echo 'usage: scripts/stage7-local.sh [restore|soak|capacity|catalog|orders|worker-scale]' >&2; exit 2 ;; esac
 port=${STAGE7_BASE_PORT:-29840}
-python3 - "$port" <<'PY'
+export SECKILL_REDIS_SHARDED=false SECKILL_REDIS_CLUSTER_ADDRS= SECKILL_STOCK_BUCKETS=1
+test_cluster=0
+if [[ "$mode" == orders ]]; then
+    export SECKILL_REDIS_SHARDED=${ORDER_TEST_SHARDED:-false} SECKILL_STOCK_BUCKETS=${ORDER_TEST_BUCKETS:-1}
+    test_cluster=${ORDER_TEST_CLUSTER:-0}
+    [[ "$test_cluster" =~ ^[01]$ ]]
+    if [[ "$test_cluster" == 1 ]]; then export SECKILL_REDIS_SHARDED=true; fi
+fi
+python3 - "$port" "$test_cluster" <<'PY'
 import socket
 import sys
 
 port = int(sys.argv[1])
 if not 1024 <= port <= 65525:
     sys.exit('Choose STAGE7_BASE_PORT between 1024 and 65525')
-for number in range(port, port + 11):
+ports = list(range(port, port + 11))
+if sys.argv[2] == '1':
+    if port > 55525:
+        sys.exit('Choose STAGE7_BASE_PORT below 55526 for the Redis cluster bus')
+    ports.extend(range(port + 10008, port + 10011))
+for number in ports:
     with socket.socket() as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -38,6 +51,7 @@ mysql=("$MYSQL_BIN_DIR/mysql" --no-defaults -u root --socket="$work/mysql.sock")
 redis=("$redis_bin/redis-cli" --raw -p "$((port+2))")
 benchmark_pid= mysql_pid= redis_pid= kafka_pid= api_pid= worker_pid= second_pid= second_worker_pid=
 scale_worker_pids=()
+cluster_pids=()
 voucher_id=9700
 stop() {
     local pid=$1 result=0
@@ -63,6 +77,7 @@ cleanup() {
     stop "$api_pid" || true
     stop "$worker_pid" || true
     stop "$kafka_pid" || true
+    for pid in "${cluster_pids[@]}"; do stop "$pid" || true; done
     stop "$redis_pid" || true
     if [[ "$mode" == orders || "$mode" == worker-scale ]]; then
         stop "$mysql_pid" 120 || true
@@ -143,6 +158,29 @@ start_redis() {
     done
     return 1
 }
+start_cluster() {
+    local offset node addr attempt
+    local -a nodes=()
+    for offset in 8 9 10; do
+        node=$((port+offset))
+        addr="127.0.0.1:$node"
+        nodes+=("$addr")
+        mkdir -p "$work/source/redis-$node"
+        "$redis_bin/redis-server" --bind 127.0.0.1 --port "$node" --requirepass "$REDIS_PASSWORD" --masterauth "$REDIS_PASSWORD" \
+            --cluster-enabled yes --cluster-config-file nodes.conf --dir "$work/source/redis-$node" --save '' \
+            --appendonly yes --appendfsync everysec > "$work/redis-$node.log" 2>&1 &
+        cluster_pids+=("$!")
+        for attempt in $(seq 1 50); do
+            if "$redis_bin/redis-cli" -p "$node" ping 2>/dev/null | grep -qx PONG; then break; fi
+            sleep .1
+        done
+        "$redis_bin/redis-cli" -p "$node" ping | grep -qx PONG
+    done
+    timeout 30 "$redis_bin/redis-cli" --cluster create "${nodes[@]}" --cluster-yes > "$work/redis-cluster-create.log"
+    SECKILL_REDIS_CLUSTER_ADDRS=$(IFS=,; echo "${nodes[*]}")
+    export SECKILL_REDIS_CLUSTER_ADDRS
+    "$redis_bin/redis-cli" --raw -p "$((port+8))" CLUSTER NODES > "$work/redis-cluster-nodes.txt"
+}
 start_kafka() {
     "$KAFKA_BIN_DIR/kafka-server-start.sh" "$1" >>"$work/kafka.log" 2>&1 & kafka_pid=$!
     for attempt in $(seq 1 120); do
@@ -214,6 +252,7 @@ mkdir -p "$work/source"
 start_mysql "$work/source/mysql"
 for sql in migrations/*.sql; do "${mysql[@]}" "$MYSQL_DATABASE" < "$sql"; done
 start_redis "$work/source/redis"
+if [[ "$test_cluster" == 1 ]]; then start_cluster; fi
 "$KAFKA_BIN_DIR/kafka-storage.sh" format -t "$("$KAFKA_BIN_DIR/kafka-storage.sh" random-uuid)" -c "$work/kafka.properties" >/dev/null
 start_kafka "$work/kafka.properties"
 if [[ "$mode" == restore ]]; then export SECKILL_PENDING_LIMIT=2; fi

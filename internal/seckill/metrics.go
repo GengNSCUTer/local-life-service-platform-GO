@@ -2,6 +2,7 @@ package seckill
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -20,6 +21,9 @@ type metrics struct {
 	retries        *prometheus.CounterVec
 	workers        *prometheus.GaugeVec
 	queues         *prometheus.GaugeVec
+	shardQueues    *prometheus.GaugeVec
+	shardDelay     *prometheus.GaugeVec
+	shardUp        *prometheus.GaugeVec
 	outboxDueDelay prometheus.Gauge
 	lag            *prometheus.GaugeVec
 	fresh          *prometheus.GaugeVec
@@ -41,6 +45,15 @@ func (s *Service) RegisterMetrics(reg prometheus.Registerer, withWorkers bool) {
 		queues: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "hmdp_seckill_queue_size", Help: "Number of reservations in the Redis outbox or timeout index.",
 		}, []string{"queue"}),
+		shardQueues: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "hmdp_seckill_shard_queue_size", Help: "Number of reservations per Redis shard and queue.",
+		}, []string{"shard", "queue"}),
+		shardDelay: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "hmdp_seckill_shard_outbox_due_delay_seconds", Help: "Seconds since the earliest relay due time per Redis shard.",
+		}, []string{"shard"}),
+		shardUp: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "hmdp_seckill_shard_queue_sample_up", Help: "Whether the most recent Redis queue sample succeeded per shard.",
+		}, []string{"shard"}),
 		outboxDueDelay: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "hmdp_seckill_outbox_due_delay_seconds", Help: "Seconds since the earliest current relay due time, including lease rescheduling.",
 		}),
@@ -59,7 +72,7 @@ func (s *Service) RegisterMetrics(reg prometheus.Registerer, withWorkers bool) {
 	if !withWorkers {
 		return
 	}
-	reg.MustRegister(m.retries, m.workers, m.queues, m.outboxDueDelay, m.lag, m.fresh, m.audits)
+	reg.MustRegister(m.retries, m.workers, m.queues, m.shardQueues, m.shardDelay, m.shardUp, m.outboxDueDelay, m.lag, m.fresh, m.audits)
 	for _, source := range []string{"redis", "kafka", "inventory"} {
 		m.fresh.WithLabelValues(source).Set(0)
 	}
@@ -133,21 +146,41 @@ func (s *Service) sample(parent context.Context, source string, collect func(con
 }
 
 func (s *Service) sampleQueues(ctx context.Context) error {
-	pipe := s.redis.TxPipeline()
-	outbox := pipe.ZCard(ctx, outboxKey)
-	pending := pipe.ZCard(ctx, timeoutKey)
-	earliest := pipe.ZRangeWithScores(ctx, outboxKey, 0, 0)
-	clock := pipe.Time(ctx)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return err
+	var totalOutbox, totalPending int64
+	var maxDelay float64
+	var sampleErr error
+	for _, shard := range s.routes() {
+		label := strconv.Itoa(int(shard))
+		operation, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		pipe := s.redisFor(shard).TxPipeline()
+		outbox := pipe.ZCard(operation, shard.outbox())
+		pending := pipe.ZCard(operation, shard.timeouts())
+		earliest := pipe.ZRangeWithScores(operation, shard.outbox(), 0, 0)
+		_, err := pipe.Exec(operation)
+		cancel()
+		if err != nil {
+			s.metrics.shardUp.WithLabelValues(label).Set(0)
+			sampleErr = errors.Join(sampleErr, fmt.Errorf("shard %s: %w", label, err))
+			continue
+		}
+		var delay float64
+		if entries := earliest.Val(); len(entries) > 0 {
+			delay = float64(max(0, time.Now().UnixMilli()-int64(entries[0].Score))) / 1000
+		}
+		maxDelay = max(maxDelay, delay)
+		totalOutbox += outbox.Val()
+		totalPending += pending.Val()
+		s.metrics.shardUp.WithLabelValues(label).Set(1)
+		s.metrics.shardQueues.WithLabelValues(label, "outbox").Set(float64(outbox.Val()))
+		s.metrics.shardQueues.WithLabelValues(label, "timeout_index").Set(float64(pending.Val()))
+		s.metrics.shardDelay.WithLabelValues(label).Set(delay)
 	}
-	var delay int64
-	if entries := earliest.Val(); len(entries) > 0 {
-		delay = max(0, clock.Val().UnixMilli()-int64(entries[0].Score))
+	if sampleErr != nil {
+		return sampleErr
 	}
-	s.metrics.outboxDueDelay.Set(float64(delay) / 1000)
-	s.metrics.queues.WithLabelValues("outbox").Set(float64(outbox.Val()))
-	s.metrics.queues.WithLabelValues("timeout_index").Set(float64(pending.Val()))
+	s.metrics.outboxDueDelay.Set(maxDelay)
+	s.metrics.queues.WithLabelValues("outbox").Set(float64(totalOutbox))
+	s.metrics.queues.WithLabelValues("timeout_index").Set(float64(totalPending))
 	return nil
 }
 

@@ -43,7 +43,7 @@ func (s *Service) create(ctx context.Context, item Voucher, activity *seckill.Ac
 		}
 		fingerprint = sha256.Sum256(payload)
 	}
-	return s.repo.create(ctx, item, activity, key, fingerprint)
+	return s.repo.create(ctx, item, activity, key, fingerprint, s.seckill.ConfigureActivity)
 }
 
 func (s *Service) initialize(ctx context.Context, id uint64) error {

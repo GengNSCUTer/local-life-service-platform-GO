@@ -51,7 +51,7 @@ func runAPI(ctx context.Context, cfg config.Config, logger *slog.Logger, startWo
 	}
 	defer func() { runErr = errors.Join(runErr, stopDiagnostics()) }()
 
-	service := seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout, cfg.SeckillOutboxLimit, cfg.SeckillPendingLimit)
+	service := deps.seckillService(cfg, logger)
 	service.RegisterMetrics(registry, startWorkers)
 	router := newRouter(logger, deps.probes(), observe.HTTP(registry))
 	users := user.New(deps.mysql, deps.redis, logger, cfg.AuthDevLogCodes)
@@ -116,7 +116,7 @@ func PrepareSeckill(ctx context.Context, cfg config.Config, logger *slog.Logger,
 	if err := seckill.CreateTopics(ctx, deps.kafka); err != nil {
 		return fmt.Errorf("prepare Kafka topics: %w", err)
 	}
-	return seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout, cfg.SeckillOutboxLimit, cfg.SeckillPendingLimit).Prepare(ctx, activity)
+	return deps.seckillService(cfg, logger).Prepare(ctx, activity)
 }
 
 func AuditSeckill(ctx context.Context, cfg config.Config, logger *slog.Logger, voucherID uint64) (_ seckill.InventoryAudit, auditErr error) {
@@ -125,5 +125,5 @@ func AuditSeckill(ctx context.Context, cfg config.Config, logger *slog.Logger, v
 		return seckill.InventoryAudit{}, err
 	}
 	defer func() { auditErr = errors.Join(auditErr, deps.close()) }()
-	return seckill.New(deps.mysql, deps.redis, logger, cfg.SeckillPendingTimeout, cfg.SeckillOutboxLimit, cfg.SeckillPendingLimit).AuditInventory(ctx, voucherID)
+	return deps.seckillService(cfg, logger).AuditInventory(ctx, voucherID)
 }

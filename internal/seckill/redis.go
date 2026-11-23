@@ -124,16 +124,16 @@ return 1
 `)
 
 func activityKey(id uint64) string {
-	return keyPrefix + "activity:" + strconv.FormatUint(id, 10)
+	return redisShard(0).activity(id)
 }
 
-func orderKey(id string) string { return keyPrefix + "order:" + id }
+func orderKey(id string) string { return orderShard(id).prefix() + "order:" + id }
 
-func reservationBackupKey(id string) string { return keyPrefix + "reservation:" + id }
+func reservationBackupKey(id string) string { return orderShard(id).prefix() + "reservation:" + id }
 
 func (s *Service) reservation(ctx context.Context, id string) (orderEvent, []byte, error) {
 	for _, key := range []string{orderKey(id), reservationBackupKey(id)} {
-		payload, err := s.redis.Get(ctx, key).Bytes()
+		payload, err := s.redisFor(orderShard(id)).Get(ctx, key).Bytes()
 		if errors.Is(err, redis.Nil) || redis.HasErrorPrefix(err, "WRONGTYPE") {
 			continue
 		}
@@ -149,9 +149,10 @@ func (s *Service) reservation(ctx context.Context, id string) (orderEvent, []byt
 }
 
 func (s *Service) compensate(ctx context.Context, event orderEvent, stockLimit string) error {
-	key := activityKey(event.VoucherID)
-	result, err := compensateReservation.Run(ctx, s.redis,
-		[]string{key, key + ":buyers", keyPrefix + "resolution:" + event.ID, orderKey(event.ID), outboxKey, timeoutKey, reservationBackupKey(event.ID)},
+	shard := orderShard(event.ID)
+	key := shard.activity(event.VoucherID)
+	result, err := compensateReservation.Run(ctx, s.redisFor(shard),
+		[]string{key, key + ":buyers", shard.prefix() + "resolution:" + event.ID, orderKey(event.ID), shard.outbox(), shard.timeouts(), reservationBackupKey(event.ID)},
 		strconv.FormatUint(event.UserID, 10), event.ID, resolutionMarkerTTL.Milliseconds(), stockLimit).Int()
 	if err == nil && result == 2 {
 		return errReservationMismatch
@@ -160,8 +161,12 @@ func (s *Service) compensate(ctx context.Context, event orderEvent, stockLimit s
 }
 
 func (s *Service) finalize(ctx context.Context, id string) error {
-	return finalizeReservation.Run(ctx, s.redis,
-		[]string{orderKey(id), outboxKey, timeoutKey, reservationBackupKey(id)}, id).Err()
+	return s.finalizeOnShard(ctx, orderShard(id), id)
+}
+
+func (s *Service) finalizeOnShard(ctx context.Context, shard redisShard, id string) error {
+	return finalizeReservation.Run(ctx, s.redisFor(shard),
+		[]string{shard.prefix() + "order:" + id, shard.outbox(), shard.timeouts(), shard.prefix() + "reservation:" + id}, id).Err()
 }
 
 func (s *Service) Prepare(ctx context.Context, activity Activity) error {
@@ -171,8 +176,11 @@ func (s *Service) Prepare(ctx context.Context, activity Activity) error {
 		return errors.New("positive voucher ID, positive stock, and a valid activity window are required")
 	}
 	activity.RemainingStock = activity.TotalStock
-	if err := createActivity(ctx, s.db, activity); err != nil {
+	if err := createActivity(ctx, s.db, s.ConfigureActivity(activity)); err != nil {
 		return fmt.Errorf("prepare MySQL activity: %w", err)
+	}
+	if err := s.db.WithContext(ctx).Table("seckill_activities").Take(&activity, "id = ?", activity.ID).Error; err != nil {
+		return err
 	}
 	return s.InitializeStock(ctx, activity)
 }
@@ -180,7 +188,8 @@ func (s *Service) Prepare(ctx context.Context, activity Activity) error {
 // InitializeStock prewarms persisted activity stock before sales open.
 // An existing Redis activity keeps its current stock.
 func (s *Service) InitializeStock(ctx context.Context, activity Activity) error {
-	initialized, err := initActivity.Run(ctx, s.redis, []string{activityKey(activity.ID)},
+	shard := activity.RedisShard
+	initialized, err := initActivity.Run(ctx, s.redisFor(shard), []string{shard.activity(activity.ID)},
 		activity.TotalStock, activity.StartsAt.UnixMilli(), activity.EndsAt.UnixMilli()).Int()
 	if err != nil {
 		return fmt.Errorf("prepare Redis stock: %w", err)

@@ -52,14 +52,14 @@ type repository struct{ db *gorm.DB }
 func (r repository) listByShop(ctx context.Context, shopID uint64) ([]listing, error) {
 	items := make([]listing, 0)
 	err := r.db.WithContext(ctx).Table("tb_voucher AS v").
-		Select("v.*, a.remaining_stock AS stock, a.starts_at AS begin_time, a.ends_at AS end_time").
+		Select("v.*, "+seckill.BucketRemainingSQL+" AS stock, a.starts_at AS begin_time, a.ends_at AS end_time").
 		Joins("LEFT JOIN voucher_seckill_links AS link ON link.voucher_id = v.id").
 		Joins("LEFT JOIN seckill_activities AS a ON a.id = link.voucher_id").
 		Where("v.shop_id = ? AND v.status = ?", shopID, activeStatus).Order("v.id ASC").Find(&items).Error
 	return items, err
 }
 
-func (r repository) create(ctx context.Context, item Voucher, activity *seckill.Activity, key string, fingerprint [32]byte) (uint64, error) {
+func (r repository) create(ctx context.Context, item Voucher, activity *seckill.Activity, key string, fingerprint [32]byte, configure func(seckill.Activity) seckill.Activity) (uint64, error) {
 	var id uint64
 	for {
 		err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -87,7 +87,7 @@ func (r repository) create(ctx context.Context, item Voucher, activity *seckill.
 			if err := tx.Table(voucherTable).Create(&item).Error; err != nil {
 				return err
 			}
-			if err := attachActivity(tx, item.ID, activity); err != nil {
+			if err := attachActivity(tx, item.ID, activity, configure); err != nil {
 				return err
 			}
 			if key != "" {
@@ -120,7 +120,7 @@ func lockRequest(tx *gorm.DB, key string, fingerprint [32]byte) (*uint64, error)
 	return previous.VoucherID, nil
 }
 
-func attachActivity(tx *gorm.DB, id uint64, activity *seckill.Activity) error {
+func attachActivity(tx *gorm.DB, id uint64, activity *seckill.Activity, configure func(seckill.Activity) seckill.Activity) error {
 	var count int64
 	if err := tx.Table("seckill_activities").Where("id = ?", id).Count(&count).Error; err != nil {
 		return err
@@ -133,7 +133,7 @@ func attachActivity(tx *gorm.DB, id uint64, activity *seckill.Activity) error {
 	}
 	item := *activity
 	item.ID = id
-	if err := tx.Table("seckill_activities").Create(&item).Error; err != nil {
+	if err := seckill.InsertActivity(tx, configure(item)); err != nil {
 		return err
 	}
 	return tx.Exec("INSERT INTO voucher_seckill_links (voucher_id) VALUES (?)", id).Error

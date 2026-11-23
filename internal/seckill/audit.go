@@ -42,9 +42,9 @@ type redisInventory struct {
 	present, valid                  bool
 }
 
-func (s *Service) readRedisInventory(ctx context.Context, voucherID uint64) (redisInventory, error) {
-	key := activityKey(voucherID)
-	fields, err := redisInventorySnapshot.Run(ctx, s.redis, []string{key, key + ":buyers"}).Slice()
+func (s *Service) readRedisInventory(ctx context.Context, voucherID uint64, shard redisShard) (redisInventory, error) {
+	key := shard.activity(voucherID)
+	fields, err := redisInventorySnapshot.Run(ctx, s.redisFor(shard), []string{key, key + ":buyers"}).Slice()
 	if redis.HasErrorPrefix(err, "WRONGTYPE") {
 		return redisInventory{present: true}, nil
 	}
@@ -78,31 +78,47 @@ func (s *Service) readRedisInventory(ctx context.Context, voucherID uint64) (red
 // AuditInventory records the latest observation. The existing resolution worker owns stock repairs.
 func (s *Service) AuditInventory(ctx context.Context, voucherID uint64) (InventoryAudit, error) {
 	result := InventoryAudit{VoucherID: voucherID, CheckedAt: time.Now().UTC().Truncate(time.Microsecond)}
+	activity, err := findInventoryLayout(ctx, s.db, voucherID)
+	if err != nil {
+		return result, err
+	}
 	readCache := func() (redisInventory, error) {
 		redisCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
 		defer cancel()
-		return s.readRedisInventory(redisCtx, voucherID)
+		return s.readRedisInventory(redisCtx, voucherID, activity.RedisShard)
 	}
 	before, beforeErr := readCache()
 	var row struct {
 		TotalStock, MySQLRemaining, ConfirmedOrders, MySQLClaims, PendingResolutions int64
 		StartsAt, EndsAt                                                             time.Time
+		BucketCount, BucketTotal, InvalidBuckets, InvalidAssignments                 int64
 	}
-	err := s.db.WithContext(ctx).Raw(`
-		SELECT a.total_stock, a.remaining_stock, a.starts_at, a.ends_at,
+	err = s.db.WithContext(ctx).Raw(`
+		SELECT a.total_stock, COALESCE(`+BucketRemainingSQL+`, 0), a.starts_at, a.ends_at,
 		       (SELECT COUNT(*) FROM seckill_orders o WHERE o.voucher_id = a.id AND o.status = 'confirmed') AS confirmed_orders,
 		       (SELECT COUNT(*) FROM seckill_order_claims c WHERE c.voucher_id = a.id),
 		       (SELECT COUNT(*) FROM seckill_orders o JOIN seckill_order_resolutions r ON r.order_id = o.id
-		        WHERE o.voucher_id = a.id AND o.status = 'cancelled' AND NOT r.redis_synced) AS pending_resolutions
+		        WHERE o.voucher_id = a.id AND o.status = 'cancelled' AND NOT r.redis_synced) AS pending_resolutions,
+		       (SELECT COUNT(*) FROM seckill_stock_buckets b WHERE b.voucher_id = a.id),
+		       (SELECT COALESCE(SUM(b.total_stock), 0) FROM seckill_stock_buckets b WHERE b.voucher_id = a.id),
+		       (SELECT COUNT(*) FROM seckill_stock_buckets b
+		        LEFT JOIN (SELECT stock_bucket, COUNT(*) AS orders FROM seckill_orders
+		                   WHERE voucher_id = ? AND status = 'confirmed' GROUP BY stock_bucket) assigned ON assigned.stock_bucket = b.bucket
+		        WHERE b.voucher_id = a.id AND (b.bucket >= a.stock_buckets OR b.remaining_stock > b.total_stock OR
+		          CAST(b.total_stock AS SIGNED) - CAST(b.remaining_stock AS SIGNED) <> COALESCE(assigned.orders, 0))),
+		       (SELECT COUNT(*) FROM seckill_orders o WHERE o.voucher_id = a.id AND o.status = 'confirmed'
+		        AND (o.stock_bucket IS NULL OR o.stock_bucket >= a.stock_buckets))
 		FROM seckill_activities a WHERE a.id = ?
-	`, voucherID).Row().Scan(&row.TotalStock, &row.MySQLRemaining, &row.StartsAt, &row.EndsAt,
-		&row.ConfirmedOrders, &row.MySQLClaims, &row.PendingResolutions)
+	`, voucherID, voucherID).Row().Scan(&row.TotalStock, &row.MySQLRemaining, &row.StartsAt, &row.EndsAt,
+		&row.ConfirmedOrders, &row.MySQLClaims, &row.PendingResolutions, &row.BucketCount, &row.BucketTotal, &row.InvalidBuckets, &row.InvalidAssignments)
 	if err != nil {
 		return result, fmt.Errorf("read MySQL activity %d: %w", voucherID, err)
 	}
 	result.TotalStock, result.MySQLRemaining, result.ConfirmedOrders = row.TotalStock, row.MySQLRemaining, row.ConfirmedOrders
 	result.MySQLClaims, result.PendingResolutions = row.MySQLClaims, row.PendingResolutions
-	if beforeErr != nil {
+	if activity.StockBuckets > 0 && (row.BucketCount != int64(activity.StockBuckets) || row.BucketTotal != row.TotalStock || row.InvalidBuckets != 0 || row.InvalidAssignments != 0) {
+		result.Status, result.Detail = auditManual, "mysql_stock_bucket_mismatch"
+	} else if beforeErr != nil {
 		result.Status, result.Detail = auditBlocked, "redis_unavailable"
 	} else {
 		after, afterErr := readCache()

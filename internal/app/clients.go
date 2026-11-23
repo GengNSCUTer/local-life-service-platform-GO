@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"time"
 
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/config"
+	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/seckill"
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
@@ -21,6 +23,7 @@ import (
 type clients struct {
 	mysql          *gorm.DB
 	redis          *redis.Client
+	seckillRedis   *redis.ClusterClient
 	kafka          *kafka.Client
 	kafkaTransport *kafka.Transport
 }
@@ -87,11 +90,21 @@ func openClients(cfg config.Config, withKafka bool) (*clients, error) {
 		})
 	}
 	deps := &clients{mysql: db, redis: redisClient}
+	if len(cfg.SeckillRedisCluster) > 0 {
+		deps.seckillRedis = redis.NewClusterClient(&redis.ClusterOptions{
+			Addrs: cfg.SeckillRedisCluster, Password: cfg.RedisPassword, ContextTimeoutEnabled: true,
+		})
+	}
 	if withKafka {
 		deps.kafkaTransport = &kafka.Transport{DialTimeout: 2 * time.Second}
 		deps.kafka = &kafka.Client{Addr: kafka.TCP(cfg.KafkaBrokers...), Transport: deps.kafkaTransport}
 	}
 	return deps, nil
+}
+
+func (c *clients) seckillService(cfg config.Config, logger *slog.Logger) *seckill.Service {
+	return seckill.New(c.mysql, c.redis, logger, cfg.SeckillPendingTimeout, cfg.SeckillOutboxLimit, cfg.SeckillPendingLimit,
+		seckill.Layout{Sharded: cfg.SeckillRedisSharded, StockBuckets: cfg.SeckillStockBuckets, Cluster: c.seckillRedis})
 }
 
 func (c *clients) close() error {
@@ -101,6 +114,9 @@ func (c *clients) close() error {
 	pool, err := c.mysql.DB()
 	if err == nil {
 		err = pool.Close()
+	}
+	if c.seckillRedis != nil {
+		err = errors.Join(err, c.seckillRedis.Close())
 	}
 	return errors.Join(err, c.redis.Close())
 }
@@ -117,6 +133,13 @@ func (c *clients) probes() []healthProbe {
 		{name: "redis", check: func(ctx context.Context) error {
 			return c.redis.Ping(ctx).Err()
 		}},
+	}
+	if c.seckillRedis != nil {
+		probes = append(probes, healthProbe{name: "seckill_redis_cluster", check: func(ctx context.Context) error {
+			return c.seckillRedis.ForEachMaster(ctx, func(ctx context.Context, client *redis.Client) error {
+				return client.Ping(ctx).Err()
+			})
+		}})
 	}
 	if c.kafka != nil {
 		probes = append(probes, healthProbe{name: "kafka", check: func(ctx context.Context) error {

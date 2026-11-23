@@ -32,18 +32,22 @@ type cancellationResult struct {
 }
 
 func (s *Service) cancelOrder(ctx context.Context, event orderEvent, reason string) (Order, error) {
+	activity, err := findInventoryLayout(ctx, s.db, event.VoucherID)
+	if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && activity.RedisShard != orderShard(event.ID)) {
+		return Order{}, errOrderNotFound
+	}
+	if err != nil {
+		return Order{}, err
+	}
 	var cancelled Order
 	for attempt := 0; attempt < 3; attempt++ {
 		err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			// Both paths lock the activity before inserting or updating an order.
-			var activity Activity
-			lock := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("seckill_activities").Select("id").
-				Take(&activity, "id = ?", event.VoucherID).Error
-			if errors.Is(lock, gorm.ErrRecordNotFound) {
-				return errOrderNotFound
-			}
-			if lock != nil {
-				return lock
+			// Legacy confirmation locks the activity first; bucketed confirmation takes the order lock first.
+			if activity.StockBuckets == 0 {
+				var locked Activity
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("seckill_activities").Select("id").Take(&locked, "id = ?", event.VoucherID).Error; err != nil {
+					return err
+				}
 			}
 			var existing Order
 			err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Table("seckill_orders").
@@ -61,13 +65,11 @@ func (s *Service) cancelOrder(ctx context.Context, event orderEvent, reason stri
 					return errOrderState
 				}
 				if existing.Status == statusConfirmed {
-					stock := tx.Table("seckill_activities").Where("id = ? AND remaining_stock < total_stock", event.VoucherID).
-						UpdateColumn("remaining_stock", gorm.Expr("remaining_stock + 1"))
-					if stock.Error != nil {
-						return stock.Error
+					if (existing.StockBucket != nil) != (activity.StockBuckets > 0) {
+						return errors.New("confirmed order has an inconsistent inventory layout")
 					}
-					if stock.RowsAffected != 1 {
-						return errors.New("confirmed order stock cannot be restored")
+					if err := restoreOrderStock(tx, existing); err != nil {
+						return err
 					}
 				}
 				now := time.Now().UTC().Truncate(time.Millisecond)
@@ -127,8 +129,8 @@ func (s *Service) syncResolution(ctx context.Context, event orderEvent) (reason 
 	stockLimit := ""
 	if state.Reason == reasonInventoryMismatch {
 		var activity Activity
-		if err := s.db.WithContext(ctx).Table("seckill_activities").Select("remaining_stock").
-			Take(&activity, "id = ?", event.VoucherID).Error; err != nil {
+		if err := s.db.WithContext(ctx).Table("seckill_activities AS a").Select(BucketRemainingSQL+" AS remaining_stock").
+			Take(&activity, "a.id = ?", event.VoucherID).Error; err != nil {
 			return state.Reason, err
 		}
 		stockLimit = strconv.FormatUint(uint64(activity.RemainingStock), 10)

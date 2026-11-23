@@ -17,6 +17,9 @@ type Config struct {
 	InventoryAuditInterval time.Duration
 	SeckillOutboxLimit     int
 	SeckillPendingLimit    int
+	SeckillRedisSharded    bool
+	SeckillRedisCluster    []string
+	SeckillStockBuckets    int
 	AuthDevLogCodes        bool
 	ShopAdminUserID        uint64
 	VoucherAdminUserID     uint64
@@ -52,6 +55,13 @@ func Load() Config {
 
 	pprofEnabled, _ := strconv.ParseBool(env("PPROF_ENABLED", "false"))
 	authDevLogCodes, _ := strconv.ParseBool(env("AUTH_DEV_LOG_CODES", "false"))
+	seckillSharded, _ := strconv.ParseBool(env("SECKILL_REDIS_SHARDED", "false"))
+	var seckillCluster []string
+	for _, addr := range strings.Split(env("SECKILL_REDIS_CLUSTER_ADDRS", ""), ",") {
+		if addr := strings.TrimSpace(addr); addr != "" {
+			seckillCluster = append(seckillCluster, addr)
+		}
+	}
 	shopAdminUserID, err := strconv.ParseUint(env("SHOP_ADMIN_USER_ID", "0"), 10, 64)
 	voucherAdminUserID, voucherErr := strconv.ParseUint(env("VOUCHER_ADMIN_USER_ID", "0"), 10, 64)
 	if err != nil {
@@ -69,6 +79,9 @@ func Load() Config {
 		InventoryAuditInterval: durationEnv("SECKILL_AUDIT_INTERVAL", time.Minute),
 		SeckillOutboxLimit:     positiveIntEnv("SECKILL_OUTBOX_LIMIT", 0),
 		SeckillPendingLimit:    positiveIntEnv("SECKILL_PENDING_LIMIT", 0),
+		SeckillRedisSharded:    seckillSharded,
+		SeckillRedisCluster:    seckillCluster,
+		SeckillStockBuckets:    positiveIntEnv("SECKILL_STOCK_BUCKETS", 1),
 		AuthDevLogCodes:        authDevLogCodes,
 		ShopAdminUserID:        shopAdminUserID,
 		VoucherAdminUserID:     voucherAdminUserID,

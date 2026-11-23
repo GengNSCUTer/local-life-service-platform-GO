@@ -2,7 +2,6 @@ package seckill
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/platform/httpx"
@@ -19,11 +19,20 @@ import (
 	"gorm.io/gorm"
 )
 
-var orderIDPattern = regexp.MustCompile(`^[A-Z2-7]{26}$`)
+var orderIDPattern = regexp.MustCompile(`^(V2-(0[1-9]|1[0-6])-)?[A-Z2-7]{26}$`)
+
+type Layout struct {
+	Sharded      bool
+	StockBuckets int
+	Cluster      *redis.ClusterClient
+}
 
 type Service struct {
 	db             *gorm.DB
 	redis          *redis.Client
+	shardRedis     *redis.ClusterClient
+	layout         Layout
+	queueShards    atomic.Pointer[[]redisShard]
 	logger         *slog.Logger
 	pendingTimeout time.Duration
 	outboxLimit    int
@@ -31,11 +40,11 @@ type Service struct {
 	metrics        *metrics
 }
 
-func New(db *gorm.DB, cache *redis.Client, logger *slog.Logger, pendingTimeout time.Duration, outboxLimit, pendingLimit int) *Service {
+func New(db *gorm.DB, cache *redis.Client, logger *slog.Logger, pendingTimeout time.Duration, outboxLimit, pendingLimit int, layout Layout) *Service {
 	if pendingTimeout < time.Second {
 		pendingTimeout = 15 * time.Minute
 	}
-	return &Service{db: db, redis: cache, logger: logger, pendingTimeout: pendingTimeout, outboxLimit: outboxLimit, pendingLimit: pendingLimit}
+	return &Service{db: db, redis: cache, shardRedis: layout.Cluster, layout: layout, logger: logger, pendingTimeout: pendingTimeout, outboxLimit: outboxLimit, pendingLimit: pendingLimit}
 }
 
 func (s *Service) Register(router *gin.Engine, requireLogin gin.HandlerFunc) {
@@ -56,17 +65,8 @@ func (s *Service) submit(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
 	userID, _ := user.CurrentID(ctx)
-	event := orderEvent{Version: 1, ID: rand.Text(), VoucherID: voucherID, UserID: userID, CreatedAt: time.Now().UTC()}
-	payload, err := json.Marshal(event)
-	if err != nil {
-		s.unavailable(c, "encode order event", err)
-		return
-	}
-	key := activityKey(voucherID)
 	started := time.Now()
-	result, err := reserveStock.Run(ctx, s.redis,
-		[]string{key, key + ":buyers", orderKey(event.ID), outboxKey, timeoutKey, reservationBackupKey(event.ID)},
-		strconv.FormatUint(userID, 10), event.ID, payload, s.pendingTimeout.Milliseconds(), s.outboxLimit, s.pendingLimit).StringSlice()
+	result, err := s.reserve(ctx, voucherID, userID)
 	if err != nil {
 		s.observe(started, "redis_reserve", "error")
 		s.unavailable(c, "reserve stock", err)
@@ -102,6 +102,29 @@ func (s *Service) submit(c *gin.Context) {
 	default:
 		s.unavailable(c, "reserve stock", fmt.Errorf("unknown Lua result %q", result[0]))
 	}
+}
+
+func (s *Service) reserve(ctx context.Context, voucherID, userID uint64) ([]string, error) {
+	shards := [2]redisShard{0, activityShard(voucherID)}
+	if s.layout.Sharded {
+		shards[0], shards[1] = shards[1], shards[0]
+	}
+	var result []string
+	for _, shard := range shards {
+		event := orderEvent{Version: 1, ID: shard.newOrderID(), VoucherID: voucherID, UserID: userID, CreatedAt: time.Now().UTC()}
+		payload, err := json.Marshal(event)
+		if err != nil {
+			return nil, err
+		}
+		key := shard.activity(voucherID)
+		result, err = reserveStock.Run(ctx, s.redisFor(shard),
+			[]string{key, key + ":buyers", orderKey(event.ID), shard.outbox(), shard.timeouts(), reservationBackupKey(event.ID)},
+			strconv.FormatUint(userID, 10), event.ID, payload, s.pendingTimeout.Milliseconds(), s.outboxLimit, s.pendingLimit).StringSlice()
+		if err != nil || len(result) != 2 || result[0] != "missing" {
+			return result, err
+		}
+	}
+	return result, nil
 }
 
 func (s *Service) status(c *gin.Context) {

@@ -26,6 +26,8 @@ type Activity struct {
 	RemainingStock uint32
 	StartsAt       time.Time
 	EndsAt         time.Time
+	RedisShard     redisShard `json:"-"`
+	StockBuckets   uint8      `json:"-"`
 }
 
 type Order struct {
@@ -35,6 +37,7 @@ type Order struct {
 	Status      string     `json:"status"`
 	CreatedAt   time.Time  `json:"createdAt"`
 	CancelledAt *time.Time `json:"cancelledAt,omitempty"`
+	StockBucket *uint8     `json:"-"`
 }
 
 type orderClaim struct {
@@ -54,6 +57,7 @@ type orderEvent struct {
 
 func (e orderEvent) valid(id string) bool {
 	return e.Version == 1 && e.ID == id && orderIDPattern.MatchString(e.ID) && e.VoucherID > 0 && e.UserID > 0 &&
+		(orderShard(id) == 0 || orderShard(id) == activityShard(e.VoucherID)) &&
 		e.CreatedAt.UTC().Year() >= 1000 && e.CreatedAt.UTC().Year() <= 9999
 }
 
@@ -76,7 +80,7 @@ func loadOrder(ctx context.Context, db *gorm.DB, id string) (Order, error) {
 
 func createActivity(ctx context.Context, db *gorm.DB, activity Activity) error {
 	if activity.StartsAt.After(time.Now()) {
-		err := db.WithContext(ctx).Table("seckill_activities").Create(&activity).Error
+		err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error { return InsertActivity(tx, activity) })
 		if !duplicateKey(err) {
 			return err
 		}
@@ -104,7 +108,20 @@ func persistOrder(ctx context.Context, db *gorm.DB, event orderEvent) error {
 	if !errors.Is(err, errOrderNotFound) {
 		return err
 	}
+	activity, err := findInventoryLayout(ctx, db, order.VoucherID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return errInventoryMismatch
+	}
+	if err != nil {
+		return err
+	}
+	if orderShard(event.ID) != activity.RedisShard {
+		return errOrderConflict
+	}
 	err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if activity.StockBuckets > 0 {
+			return persistBucketOrder(tx, order, activity.StockBuckets)
+		}
 		// Take the activity lock first, matching cancellation and the order foreign key.
 		update := tx.Table("seckill_activities").Where("id = ? AND remaining_stock > 0", order.VoucherID).
 			UpdateColumn("remaining_stock", gorm.Expr("remaining_stock - 1"))
@@ -117,9 +134,8 @@ func persistOrder(ctx context.Context, db *gorm.DB, event orderEvent) error {
 		if err := tx.Table("seckill_orders").Create(&order).Error; err != nil {
 			return err
 		}
-		claim := orderClaim{VoucherID: order.VoucherID, UserID: order.UserID, OrderID: order.ID, CreatedAt: order.CreatedAt}
 		// A duplicate claim rolls back the order and stock change above.
-		return tx.Table("seckill_order_claims").Create(&claim).Error
+		return insertOrderClaim(tx, order)
 	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if !duplicateKey(err) && !errors.Is(err, errInventoryMismatch) {
 		return err

@@ -20,7 +20,7 @@ func TestReservationRecovery(t *testing.T) {
 	dsn := os.Getenv("HMDP_SECKILL_TEST_DSN")
 	addr := os.Getenv("HMDP_SECKILL_TEST_REDIS_ADDR")
 	if dsn == "" || addr == "" {
-		t.Skip("set MySQL and Redis test addresses for an isolated environment with migrations 001, 002, 006 and 007")
+		t.Skip("set MySQL and Redis test addresses for an isolated environment with migrations through 010")
 	}
 	db, err := gorm.Open(mysql.Open(dsn))
 	if err != nil {
@@ -33,7 +33,7 @@ func TestReservationRecovery(t *testing.T) {
 	defer pool.Close()
 	cache := redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD")})
 	defer cache.Close()
-	service := New(db, cache, slog.Default(), time.Minute, 0, 0)
+	service := New(db, cache, slog.Default(), time.Minute, 0, 0, Layout{})
 
 	for _, route := range []string{"confirmed before timeout", "recover backup", "audit missing payload", "inventory mismatch never increases Redis stock"} {
 		t.Run(route, func(t *testing.T) {
@@ -116,7 +116,7 @@ func TestReservationRecovery(t *testing.T) {
 				wantStock = 0
 			}
 			if route != "inventory mismatch never increases Redis stock" {
-				if err := service.expireNext(ctx); err != nil {
+				if err := service.expireOnShard(ctx, 0); err != nil {
 					t.Fatal(err)
 				}
 			}
