@@ -72,7 +72,7 @@ func openClients(cfg config.Config, withKafka bool) (*clients, error) {
 	redisOptions := &redis.FailoverOptions{
 		MasterName:            cfg.RedisMasterName,
 		SentinelAddrs:         cfg.RedisSentinels,
-		SentinelPassword:      cfg.RedisPassword,
+		SentinelPassword:      cfg.RedisSentinelPassword,
 		Password:              cfg.RedisPassword,
 		ContextTimeoutEnabled: true,
 	}

@@ -21,7 +21,7 @@ services:
 
   redis:
     image: redis:7.2
-    command: ['redis-server', '--appendonly', 'yes', '--appendfsync', 'always', '--requirepass', '${REDIS_PASSWORD:-hmdp_dev_redis}', '--min-replicas-to-write', '1', '--min-replicas-max-lag', '10']
+    command: ['redis-server', '--appendonly', 'yes', '--appendfsync', 'always', '--requirepass', '${REDIS_PASSWORD:-hmdp_dev_redis}', '--masterauth', '${REDIS_PASSWORD:-hmdp_dev_redis}', '--min-replicas-to-write', '1', '--min-replicas-max-lag', '10']
     environment:
       REDISCLI_AUTH: ${REDIS_PASSWORD:-hmdp_dev_redis}
     ports:
@@ -54,7 +54,7 @@ services:
     image: redis:7.2
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:-hmdp_dev_redis}
-    command: ['sh', '-c', 'printf "port 26379\nbind 0.0.0.0\nsentinel monitor hmdp-master redis 6379 2\nsentinel auth-pass hmdp-master $$REDIS_PASSWORD\nsentinel down-after-milliseconds hmdp-master 3000\nsentinel failover-timeout hmdp-master 15000\nsentinel parallel-syncs hmdp-master 1\n" > /tmp/sentinel.conf && exec redis-server /tmp/sentinel.conf --sentinel']
+    command: ['sh', '-c', 'printf "port 26379\nbind 0.0.0.0\nsentinel resolve-hostnames yes\nsentinel monitor hmdp-master redis 6379 2\nsentinel auth-pass hmdp-master %s\nsentinel down-after-milliseconds hmdp-master 3000\nsentinel failover-timeout hmdp-master 15000\nsentinel parallel-syncs hmdp-master 1\n" "$$REDIS_PASSWORD" > /tmp/sentinel.conf && exec redis-server /tmp/sentinel.conf --sentinel']
     depends_on:
       redis:
         condition: service_healthy

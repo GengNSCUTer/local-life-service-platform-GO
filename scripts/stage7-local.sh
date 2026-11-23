@@ -55,6 +55,7 @@ stop() {
     fi
 }
 cleanup() {
+    trap '' INT TERM
     stop "$benchmark_pid" || true
     for pid in "${scale_worker_pids[@]}"; do stop "$pid" || true; done
     stop "$second_worker_pid" || true
@@ -68,8 +69,9 @@ cleanup() {
     else
         stop "$mysql_pid" || true
     fi
-    if [[ "$mode" == catalog || "$mode" == orders || "$mode" == worker-scale ]]; then
-        rm -rf -- "$work/source" "$work/kafka-logs" "$work/api" "$work/worker" "$work/seckill-bench"
+    rm -rf -- "$work/source" "$work/kafka-logs" "$work/restored" "$work/seckill-bench"
+    if [[ "$mode" != capacity ]]; then
+        rm -f -- "$work/api" "$work/worker"
     fi
 }
 trap cleanup EXIT
@@ -104,7 +106,10 @@ start_mysql() {
     mkdir -p "$data"
     local basedir
     basedir=$(dirname -- "$MYSQL_BIN_DIR")
-    "$MYSQL_BIN_DIR/mysqld" --no-defaults --basedir="$basedir" --datadir="$data" --initialize-insecure >>"$work/mysql.log" 2>&1
+    "$MYSQL_BIN_DIR/mysqld" --no-defaults --basedir="$basedir" --datadir="$data" --initialize-insecure >>"$work/mysql.log" 2>&1 &
+    mysql_pid=$!
+    wait "$mysql_pid"
+    mysql_pid=
     run_mysql "$data"
     "${mysql[@]}" -e "CREATE DATABASE $MYSQL_DATABASE; CREATE USER '$MYSQL_USER'@'127.0.0.1' IDENTIFIED BY '$MYSQL_PASSWORD'; GRANT ALL ON $MYSQL_DATABASE.* TO '$MYSQL_USER'@'127.0.0.1';"
 }
@@ -120,6 +125,7 @@ run_mysql() {
     fi
     "$MYSQL_BIN_DIR/mysqld" --no-defaults "${options[@]}" --basedir="$(dirname -- "$MYSQL_BIN_DIR")" --datadir="$1" --bind-address=127.0.0.1 --port="$((port+1))" --mysqlx=OFF --socket="$work/mysql.sock" --pid-file="$work/mysql.pid" >>"$work/mysql.log" 2>&1 & mysql_pid=$!
     for attempt in $(seq 1 120); do
+        kill -0 "$mysql_pid" 2>/dev/null || return 1
         if "${mysql[@]}" -e 'SELECT 1' >/dev/null 2>&1; then break; fi
         sleep .25
     done

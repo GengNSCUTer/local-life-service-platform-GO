@@ -8,9 +8,25 @@ if [[ ${1:-} != isolated ]]; then
     work=$(mktemp -d "$PWD/runtime/million-connections.XXXXXX")
     export TMPDIR="$work" GOTMPDIR="$work"
     printf 'Connection validation artifacts: %s\n' "$work"
+    namespace_pid=
+    cleanup_binaries() {
+        trap '' INT TERM
+        if [[ -n "$namespace_pid" ]]; then
+            kill -TERM "$namespace_pid" 2>/dev/null || true
+            wait "$namespace_pid" 2>/dev/null || true
+        fi
+        rm -f -- "$work/api" "$work/connection-bench"
+    }
+    trap cleanup_binaries EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     go build -o "$work/api" ./cmd/api
     go build -o "$work/connection-bench" ./cmd/connection-bench
-    exec unshare --user --map-root-user --net -- "$BASH" "$0" isolated "$work"
+    unshare --user --map-root-user --net -- "$BASH" "$0" isolated "$work" &
+    namespace_pid=$!
+    wait "$namespace_pid"
+    namespace_pid=
+    exit 0
 fi
 [[ $(readlink /proc/self/ns/net) != "$(readlink /proc/1/ns/net)" ]]
 work=$2
@@ -26,6 +42,7 @@ export GOMAXPROCS=${CONNECTION_TEST_PROCS:-3}
 pids=()
 client_pid=
 cleanup() {
+    trap '' INT TERM
     for pid in ${client_pid:+"$client_pid"} "${pids[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
     for pid in ${client_pid:+"$client_pid"} "${pids[@]}"; do wait "$pid" || true; done
 }

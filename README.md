@@ -20,7 +20,7 @@ go run ./cmd/api
 go run ./cmd/worker
 ```
 
-Compose 启动本地 MySQL、Redis 主节点、Redis 副本、三个 Redis Sentinel 和单节点 Kafka。默认只绑定本机，主节点端口为 `26379`，Sentinel 端口为 `26380`、`26381`、`26382`，其他端口分别为 `23306` 和 `29092`。MySQL 初始化 `hmdp` 空库。API 从进程环境变量读取配置，API 与 Compose 可以共用 `.env.example` 中的设置。连接独立服务时，可覆盖 `MYSQL_ADDR`、`REDIS_ADDR`、`REDIS_SENTINEL_ADDRS` 和逗号分隔的 `KAFKA_BROKERS`。
+Compose 启动本地 MySQL、Redis 主节点、Redis 副本、三个 Redis Sentinel 和单节点 Kafka。默认只绑定本机，主节点端口为 `26379`，Sentinel 端口为 `26380`、`26381`、`26382`，其他端口分别为 `23306` 和 `29092`。MySQL 初始化 `hmdp` 空库。API 从进程环境变量读取配置，API 与 Compose 可以共用 `.env.example` 中的设置。连接独立服务时，可覆盖 `MYSQL_ADDR`、`REDIS_ADDR`、`REDIS_SENTINEL_ADDRS` 和逗号分隔的 `KAFKA_BROKERS`。`REDIS_PASSWORD` 用于 Redis 数据节点。连接启用了客户端认证的外部 Sentinel 时，另设 `REDIS_SENTINEL_PASSWORD`。
 
 按[秒杀联调步骤](docs/03-seckill-design.md#本地体验)应用 SQL 迁移并准备活动。[用户登录与鉴权](docs/07-user-authentication.md)提供验证码登录、跨实例会话与真实 Token 抢券的联调步骤。
 
@@ -54,7 +54,7 @@ go vet ./...
 - `Ctrl+C` 或 `SIGTERM` 会让 API 停止接收新连接，给正在处理的请求最多 10 秒完成，然后关闭客户端。
 - `docker compose down` 停止本地中间件并保留数据卷。
 
-本项目通过了 `go test -race ./...` 和 `go vet ./...`。早期阶段使用独立的 MySQL 8.0.33、Redis 7.2.11 和 Kafka 4.1.2 验证了 Kafka 停机恢复、Redis Sentinel 主从切换、10,000 条 Kafka 长积压恢复、死信自动补偿、非法消息审计和优雅停机。仓库提供可复现故障脚本。当前环境没有 Docker socket 权限，阶段 4 新增的订单生命周期脚本已完成语法检查，仍需在有 Docker 权限的环境执行。
+本项目通过了 `go test -race ./...` 和 `go vet ./...`。早期阶段使用独立的 MySQL 8.0.33、Redis 7.2.11 和 Kafka 4.1.2 验证了 Kafka 停机恢复、Redis Sentinel 主从切换、10,000 条 Kafka 长积压恢复、死信自动补偿、非法消息审计和优雅停机。以下 Docker 演练使用独立项目，退出时删除该次演练创建的容器和数据卷。当前环境没有 Docker socket 权限，可使用独立进程运行本机回归。
 
 ```bash
 scripts/redis-sentinel-smoke.sh

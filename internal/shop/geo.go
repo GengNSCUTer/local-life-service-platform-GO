@@ -3,6 +3,7 @@ package shop
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -46,35 +47,14 @@ type nearbyShop struct {
 
 func (s *Service) findNearby(ctx context.Context, kind uint64, x, y float64, page int) ([]nearbyShop, error) {
 	items := make([]nearbyShop, 0)
-	key, err := s.geoIndex(ctx, kind)
-	if err != nil {
-		return nil, err
-	}
 	const size = 5
 	query := &redis.GeoSearchLocationQuery{
 		GeoSearchQuery: redis.GeoSearchQuery{Longitude: x, Latitude: y, Radius: 5000, RadiusUnit: "m", Sort: "ASC", Count: page * size},
 		WithDist:       true,
 	}
-	locations, err := s.cache.GeoSearchLocation(ctx, key, query).Result()
+	locations, err := s.nearbyLocations(ctx, kind, query)
 	if err != nil {
 		return nil, err
-	}
-	if len(locations) == 0 {
-		// The ZSET can be evicted independently of its marker after geoIndex returns.
-		ready, err := geoReady.Run(ctx, s.cache, []string{key, key + ":ready"}).Int()
-		if err != nil {
-			return nil, err
-		}
-		if ready == 0 {
-			key, err = s.geoIndex(ctx, kind)
-			if err != nil {
-				return nil, err
-			}
-			locations, err = s.cache.GeoSearchLocation(ctx, key, query).Result()
-			if err != nil {
-				return nil, err
-			}
-		}
 	}
 	start := (page - 1) * size
 	if len(locations) <= start {
@@ -103,6 +83,31 @@ func (s *Service) findNearby(ctx context.Context, kind uint64, x, y float64, pag
 		}
 	}
 	return items, nil
+}
+
+func (s *Service) nearbyLocations(ctx context.Context, kind uint64, query *redis.GeoSearchLocationQuery) ([]redis.GeoLocation, error) {
+	for range 2 {
+		key, err := s.geoIndex(ctx, kind)
+		if err != nil {
+			return nil, err
+		}
+		// Check readiness and search within one Redis transaction so a concurrent
+		// eviction or rebuild cannot turn a missing index into a valid empty page.
+		pipe := s.cache.TxPipeline()
+		ready := geoReady.Eval(ctx, pipe, []string{key, key + ":ready"})
+		locations := pipe.GeoSearchLocation(ctx, key, query)
+		if _, err := pipe.Exec(ctx); err != nil {
+			return nil, err
+		}
+		present, err := ready.Int()
+		if err != nil {
+			return nil, err
+		}
+		if present == 1 {
+			return locations.Val(), nil
+		}
+	}
+	return nil, errors.New("shop GEO index repeatedly evicted during search")
 }
 
 // The index, readiness marker and lease share the category's Redis hash tag.

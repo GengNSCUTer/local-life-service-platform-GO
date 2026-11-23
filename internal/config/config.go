@@ -28,6 +28,7 @@ type Config struct {
 	RedisAddr              string
 	RedisPassword          string
 	RedisSentinels         []string
+	RedisSentinelPassword  string
 	RedisMasterName        string
 	KafkaBrokers           []string
 	KafkaRelayWorkers      int
@@ -79,6 +80,7 @@ func Load() Config {
 		RedisAddr:              env("REDIS_ADDR", localAddr("REDIS_PORT", "26379")),
 		RedisPassword:          env("REDIS_PASSWORD", "hmdp_dev_redis"),
 		RedisSentinels:         sentinels,
+		RedisSentinelPassword:  env("REDIS_SENTINEL_PASSWORD", ""),
 		RedisMasterName:        env("REDIS_MASTER_NAME", "hmdp-master"),
 		KafkaBrokers:           brokers,
 		KafkaRelayWorkers:      positiveIntEnv("KAFKA_RELAY_WORKERS", 4),

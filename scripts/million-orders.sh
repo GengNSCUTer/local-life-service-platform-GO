@@ -97,7 +97,11 @@ PY
     [[ "$cursor" == 1 ]]
     "$KAFKA_BIN_DIR/kafka-consumer-groups.sh" --bootstrap-server "$KAFKA_BROKERS" --describe \
         --group hmdp-seckill-orders-v1 > "$work/orders-offsets-after.txt"
-    awk -v expected="$partitions" '$2=="hmdp.seckill.order.v1" {n++; if ($6!="0") failed=1} END {exit (n!=expected || failed)}' "$work/orders-offsets-after.txt"
+    awk -v expected="$partitions" '$2=="hmdp.seckill.order.v1" {
+        n++
+        # Kafka prints a dash for a partition with no committed offset.
+        if ($6!="0" && !($4=="-" && $5=="0" && $6=="-")) failed=1
+    } END {exit (n!=expected || failed)}' "$work/orders-offsets-after.txt"
     for (( index=0; index<activities; index++ )); do
         voucher_id=$((first+index))
         assert_inventory "$users" "$work/audit-$voucher_id.json"

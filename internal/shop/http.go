@@ -26,7 +26,7 @@ type shopPatch struct {
 	Area      *string  `json:"area" binding:"omitempty,max=128"`
 	Address   *string  `json:"address" binding:"omitempty,min=1,max=255"`
 	X         *float64 `json:"x" binding:"omitempty,gte=-180,lte=180"`
-	Y         *float64 `json:"y" binding:"omitempty,gte=-90,lte=90"`
+	Y         *float64 `json:"y" binding:"omitempty,gte=-85.05112878,lte=85.05112878"`
 	AvgPrice  *uint64  `json:"avgPrice"`
 	OpenHours *string  `json:"openHours" binding:"omitempty,max=32"`
 }

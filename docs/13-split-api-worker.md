@@ -49,7 +49,7 @@ docker compose -f compose.yaml -f compose.apps.yaml up -d --build --no-deps work
 
 ## 本机备份恢复与持续压测
 
-[演练脚本](../scripts/stage7-local.sh) 启动独立的 MySQL、Redis 和 Kafka，把数据和日志放在 `runtime/stage7-*`。设置 `MYSQL_BIN_DIR`、`REDIS_BIN_DIR` 和 `KAFKA_BIN_DIR` 后执行以下命令。并行运行时各用一个 `STAGE7_BASE_PORT`。
+[演练脚本](../scripts/stage7-local.sh) 启动独立的 MySQL、Redis 和 Kafka，把数据和日志放在 `runtime/stage7-*`。退出时回收测试进程及运行中的数据目录，保留日志、报告和 `restore` 模式生成的备份。设置 `MYSQL_BIN_DIR`、`REDIS_BIN_DIR` 和 `KAFKA_BIN_DIR` 后执行以下命令。并行运行时各用一个 `STAGE7_BASE_PORT`。
 
 ```bash
 scripts/stage7-local.sh restore
