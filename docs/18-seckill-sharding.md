@@ -21,6 +21,25 @@ Redis 侧仍按活动保留总库存和一套买家去重数据。MySQL 分桶�
 3. 使用 Cluster 时，所有 API、Worker 和活动管理命令配置同一份 `SECKILL_REDIS_CLUSTER_ADDRS`。它使用 `REDIS_PASSWORD`。原 Redis 继续服务会话、其他业务及旧活动。分片键若曾落在原 Redis，切换这些键的后端前需要单独迁移数据。本实现按活动创建时的布局运行，切换配置不会重建或迁移已有活动。
 4. 停止创建新版活动可以关闭创建开关。新版活动已创建后，处理这些订单的 API 和 Worker 仍需识别新版布局，并保留对应 Redis 连接。回滚到旧二进制须等新版活动的查询、取消和补偿窗口结束，或先完成数据迁移。
 
+### 执行与核验迁移 010
+
+已有 v1 库应已应用 `001` 至 `009`。备份目标 MySQL，从仓库根目录执行下面的命令。示例连接当前 Compose 项目的 MySQL。外部实例应使用部署实际连接的地址和库名。
+
+```bash
+docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/010_seckill_shards.sql
+
+docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' <<'SQL'
+SELECT DATABASE() AS migrated_database;
+SHOW CREATE TABLE seckill_activities;
+SHOW CREATE TABLE seckill_orders;
+SHOW CREATE TABLE seckill_stock_buckets;
+SQL
+```
+
+核对活动表有 `redis_shard` 和 `stock_buckets`，默认值均为 `0`，并有 `idx_seckill_activity_shard` 索引。订单表新增允许 `NULL` 的 `stock_bucket`。库存桶表以 `(voucher_id, bucket)` 为主键，`voucher_id` 引用活动表。完成核验后再升级应用进程。
+
+在隔离 MySQL 8.0.33 中，用含历史活动、已确认订单、已取消订单及领取记录的 v1 库执行 `010` 两次。每次执行后原字段及数据均与迁移前一致，旧活动布局为 `0`，旧订单的 `stock_bucket` 为 `NULL`，库存桶表为空。迁移后仍可使用旧版字段插入活动和订单。空库从 `001` 到 `010` 的完整初始化也已通过验证。
+
 ## 3090 实测
 
 2026 年 11 月 23 日，使用隔离的 MySQL 8.0.33、Redis 7.2.11 和 Kafka 4.1.2。MySQL 每次提交刷盘并同步 binlog，Redis AOF 为 `everysec`。每轮使用一个 API、一个 Worker、24 个 Kafka 订单分区。确认吞吐从开始提交算到首次采样发现全量确认且 Redis 队列为空。

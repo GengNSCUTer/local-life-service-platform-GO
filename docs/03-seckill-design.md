@@ -40,15 +40,17 @@ flowchart LR
 日常联调通过[优惠券管理接口](09-voucher-and-order.md)创建活动。下面的命令适用于隔离的压测或故障演练环境。按 [README](../README.md) 启动依赖，每次新实验选一个新的 `voucher-id`。
 
 ```bash
-docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/001_seckill.sql
-docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/002_seckill_dead_letters.sql
-docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/003_user.sql
-docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/006_order_lifecycle.sql
-docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/007_reservation_anomalies.sql
-docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/008_social.sql
-docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/009_inventory_audits.sql
-docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/010_seckill_shards.sql
+(
+  set -e
+  for migration in migrations/[0-9][0-9][0-9]_*.sql; do
+    docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < "$migration"
+  done
+)
+```
 
+迁移全部成功后，再准备演练活动和 Token。
+
+```bash
 go run ./cmd/api prepare-seckill -voucher-id 42 -stock 10 \
   -starts-at "$(date -u -d '+30 seconds' +%FT%TZ)" \
   -ends-at "$(date -u -d '+20 minutes' +%FT%TZ)"
