@@ -36,7 +36,8 @@ def submit(port, voucher, prefix, sequence, check_confirmation):
                         break
                     time.sleep(.05)
     except (OSError, ValueError, http.client.HTTPException) as exc:
-        error = str(exc)
+        if accepted is None:
+            error = str(exc)
     finally:
         connection.close()
     return accepted if accepted is not None else (time.monotonic() - start) * 1000, error, confirmed
@@ -91,6 +92,7 @@ def main():
                       'requests': len(latencies), 'accepted': len(latencies) - errors,
                       'errors': errors, 'firstError': first_error, 'p99Ms': round(percentile, 2),
                       'confirmationSamples': len(confirmation),
+                      'confirmationMissing': args.seconds - len(confirmation) if args.measure_confirmation else None,
                       'confirmationP99Ms': round(confirmation[math.ceil(len(confirmation)*.99)-1], 2) if confirmation else None,
                       'acceptedByPort': accepted_by_port}), flush=True)
     return int(errors > 0)

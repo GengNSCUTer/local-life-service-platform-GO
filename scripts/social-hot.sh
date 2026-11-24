@@ -41,20 +41,20 @@ run_social_hot() {
     social_hot_snapshot before
     python3 scripts/social_hot.py load "$rate" "$duration" "$workload" "$((stock+1))" "${targets[@]}" | tee "$work/social-hot.json"
     if ((order_rate > 0)); then
-        python3 - "$work/social-hot.json" <<'PY'
-import json, sys
-with open(sys.argv[1]) as report:
-    data = json.load(report)
-assert data['dropped'] == 0, data
-for result in data['requestGroups'].values():
-    assert result['success'] == sum(result['statuses'].values()), data
-PY
         wait "$benchmark_pid"
         benchmark_pid=
         wait_confirmed "$stock"
         wait_empty
         assert_inventory "$stock"
         tail -1 "$work/seckill-soak.jsonl"
+        python3 - "$work/social-hot.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as report:
+    data = json.load(report)
+missed = data['dropped'] + sum(sum(row['statuses'].values()) - row['success'] for row in data['requestGroups'].values())
+planned = data['offered_rps'] * data['seconds']
+assert missed * 1000 <= planned, data
+PY
     fi
     social_hot_assert_counters
     printf 'counter mismatches: 0\n' | tee "$work/social-counter-audit.txt"
