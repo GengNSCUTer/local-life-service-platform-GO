@@ -102,6 +102,23 @@ func (s *Service) OptionalLogin() gin.HandlerFunc {
 	return s.authenticate(false)
 }
 
+// VisitorLogin attaches an identity when possible and keeps the public page accessible.
+func (s *Service) VisitorLogin(c *gin.Context) {
+	token := authorizationToken(c.GetHeader("Authorization"))
+	if token != "" && len(token) <= 256 {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 25*time.Millisecond)
+		values, err := readSession.Run(ctx, s.cache, []string{sessionKey(token)},
+			sessionRenew.Milliseconds(), sessionTTL.Milliseconds()).StringSlice()
+		cancel()
+		if err == nil && len(values) == 3 {
+			if id, err := strconv.ParseUint(values[0], 10, 64); err == nil && id != 0 {
+				c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), identityKey{}, identity{profile: profile{ID: id}}))
+			}
+		}
+	}
+	c.Next()
+}
+
 func (s *Service) authenticate(required bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if !required && c.GetHeader("Authorization") == "" {

@@ -36,10 +36,11 @@ type shopWriteRequest struct {
 	shopPatch
 }
 
-func (s *Service) Register(router *gin.Engine, requireLogin gin.HandlerFunc) {
+func (s *Service) Register(router *gin.Engine, requireLogin, visitorLogin gin.HandlerFunc) {
 	router.GET("/shop-type/list", s.types)
 	shops := router.Group("/shop")
-	shops.GET("/:id", s.get)
+	shops.GET("/:id", visitorLogin, s.get)
+	shops.GET("/statistics/uv", requireLogin, s.requireAdmin, s.dailyUV)
 	shops.GET("/of/type", s.listByType)
 	shops.GET("/of/name", s.listByName)
 	maintenance := shops.Group("", requireLogin, s.requireAdmin)
@@ -70,6 +71,7 @@ func (s *Service) get(c *gin.Context) {
 		s.respondError(c, "get shop", err)
 		return
 	}
+	s.recordVisit(c)
 	httpx.Respond(c, http.StatusOK, "", item)
 }
 

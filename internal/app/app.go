@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/config"
+	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/media"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/platform/observe"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/seckill"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/shop"
@@ -57,8 +58,13 @@ func runAPI(ctx context.Context, cfg config.Config, logger *slog.Logger, startWo
 	users := user.New(deps.mysql, deps.redis, logger, cfg.AuthDevLogCodes)
 	users.Register(router)
 	requireLogin := users.RequireLogin()
+	images, err := media.New(cfg.MediaEndpoint, cfg.MediaAccessKey, cfg.MediaSecretKey, cfg.MediaBucket, cfg.MediaPublicURL)
+	if err != nil {
+		return err
+	}
+	images.Register(router, requireLogin, logger)
 	service.Register(router, requireLogin)
-	shop.New(deps.mysql, deps.redis, logger, cfg.ShopAdminUserID).Register(router, requireLogin)
+	shop.New(deps.mysql, deps.redis, logger, cfg.ShopAdminUserID).Register(router, requireLogin, users.VisitorLogin)
 	voucher.New(deps.mysql, logger, cfg.VoucherAdminUserID, service).Register(router, requireLogin)
 	community := social.New(deps.mysql, deps.redis, logger)
 	community.Register(router, requireLogin, users.OptionalLogin())

@@ -23,6 +23,11 @@ type Config struct {
 	AuthDevLogCodes        bool
 	ShopAdminUserID        uint64
 	VoucherAdminUserID     uint64
+	MediaEndpoint          string
+	MediaAccessKey         string
+	MediaSecretKey         string
+	MediaBucket            string
+	MediaPublicURL         string
 	MySQLAddr              string
 	MySQLUser              string
 	MySQLPassword          string
@@ -85,6 +90,11 @@ func Load() Config {
 		AuthDevLogCodes:        authDevLogCodes,
 		ShopAdminUserID:        shopAdminUserID,
 		VoucherAdminUserID:     voucherAdminUserID,
+		MediaEndpoint:          env("MEDIA_S3_ENDPOINT", ""),
+		MediaAccessKey:         env("MEDIA_S3_ACCESS_KEY", ""),
+		MediaSecretKey:         env("MEDIA_S3_SECRET_KEY", ""),
+		MediaBucket:            env("MEDIA_S3_BUCKET", ""),
+		MediaPublicURL:         env("MEDIA_PUBLIC_URL", ""),
 		MySQLAddr:              env("MYSQL_ADDR", localAddr("MYSQL_PORT", "23306")),
 		MySQLUser:              env("MYSQL_USER", "hmdp"),
 		MySQLPassword:          env("MYSQL_PASSWORD", "hmdp_dev_mysql"),
