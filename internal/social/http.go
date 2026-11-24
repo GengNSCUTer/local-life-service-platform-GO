@@ -186,6 +186,7 @@ func (s *Service) feed(c *gin.Context) {
 		page := s.db.WithContext(ctx).Table("tb_blog AS candidate FORCE INDEX (PRIMARY)").
 			Select("STRAIGHT_JOIN candidate.id").
 			Joins("JOIN social_follows candidate_follow ON candidate_follow.follow_user_id = candidate.user_id AND candidate_follow.user_id = ?", viewer).
+			Where("EXISTS (SELECT 1 FROM social_follows available WHERE available.user_id = ?)", viewer).
 			Order("candidate.id DESC").Limit(pageSize + 1)
 		if before != 0 {
 			page = page.Where("candidate.id < ?", before)

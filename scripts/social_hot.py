@@ -89,6 +89,7 @@ def verify(port, second, api_count):
         if page.get("nextCursor"):
             tail = check("GET", "/blog/of/follow?cursor=" + page["nextCursor"], viewer)
             assert tail["list"][0]["id"] < ids[-1]
+    assert check("GET", "/blog/of/follow", 4)["list"] == []
     for _ in range(30):
         status, page = request(port, "GET", "/blog/hot?snapshot=true")
         if status == 200 and page.get("nextCursor"):

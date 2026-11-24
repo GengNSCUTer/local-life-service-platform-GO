@@ -17,7 +17,7 @@ run_social_hot() {
     python3 scripts/social_hot.py seed "${SOCIAL_HOT_BLOGS:-1000000}" "${SOCIAL_HOT_COMMENTS:-100000}" | "${mysql[@]}" "$MYSQL_DATABASE"
     seed_sessions "$((stock+4096))" > "$work/sessions.log"
     python3 scripts/social_hot.py verify "$port" "$((port+8))" "$api_count" | tee "$work/social-smoke.log"
-    if [[ "$workload" == matrix ]]; then
+    if [[ "$workload" == matrix || "$workload" == sweep ]]; then
         social_hot_matrix
         return
     fi
@@ -95,10 +95,18 @@ social_hot_matrix() {
     local round variant count kind offered buckets cache
     local second_addr="127.0.0.1:$((port+8))"
     local -a targets
-    for round in 1 2 3; do
+    local -a variants=(legacy buckets cache combined)
+    local -a steps=(read:200 read:800 write:200 write:800 mixed:400)
+    local -a rounds=(1 2 3)
+    if [[ ${SOCIAL_HOT_WORKLOAD:-} == sweep ]]; then
+        variants=(combined)
+        steps=(write:800 write:1600 write:2400 write:3200 write:4800)
+        rounds=(1 2)
+    fi
+    for round in "${rounds[@]}"; do
         count=2
         if [[ "$round" == 1 ]]; then count=1; fi
-        for variant in legacy buckets cache combined; do
+        for variant in "${variants[@]}"; do
             buckets=false cache=false
             case "$variant" in buckets) buckets=true ;; cache) cache=true ;; combined) buckets=true; cache=true ;; esac
             stop "$second_pid"; second_pid=
@@ -111,7 +119,8 @@ social_hot_matrix() {
                 wait_ready "$second_addr"
                 targets+=("$((port+8))")
             fi
-            for spec in read:200 read:800 write:200 write:800 mixed:400; do
+            local spec
+            for spec in "${steps[@]}"; do
                 kind=${spec%:*}; offered=${spec#*:}
                 local label="r${round}-${variant}-${kind}-${offered}"
                 social_hot_snapshot "$label-before"
