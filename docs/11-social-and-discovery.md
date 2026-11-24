@@ -9,7 +9,7 @@
 | `POST /blog` | 登录后传 `shopId`、`title`、`content` 和可选的 `images` |
 | `GET /blog/:id`、`GET /blog/hot` | 博客详情和热门列表，携带 Token 时返回个人点赞状态 |
 | `GET /blog/of/me`、`GET /blog/of/user?id=123` | 按 `current` 查询个人或指定作者的博客 |
-| `PUT /blog/like/:id?liked=true`、`DELETE /blog/like/:id` | 幂等地点赞和取消点赞。兼容旧客户端的 `PUT /blog/like/:id` 切换用法 |
+| `PUT /blog/like/:id?liked=true`、`DELETE /blog/like/:id` | 幂等地点赞和取消点赞。`PUT` 必须传 `liked=true` 或 `liked=false` |
 | `GET /blog/likes/:id` | 最近点赞的 5 位用户 |
 | `PUT /follow/:id/true`、`PUT /follow/:id/false` | 登录后关注或取关 |
 | `GET /follow/or/not/:id`、`GET /follow/common/:id` | 查询关注状态与共同关注 |
@@ -22,9 +22,33 @@
 
 关注动态保留 `list`、`minTime` 和 `offset` 响应字段。`minTime` 在 Go 版是本页最后一条博客 ID，可作为旧客户端下一页的 `lastId`，`offset` 固定为 0。
 
+## 原版前端的点赞按钮
+
+首页、博客详情页和个人主页的关注动态共用一个点赞按钮逻辑。页面用查询结果里的 `isLike` 点亮图标。点击时，灰色按钮发 `PUT ?liked=true`，点亮的按钮发 `DELETE`。请求期间暂时禁用该帖子的按钮，成功后更新图标和当前页面的计数。网络响应丢失时图标保持原状，再点击会重发相同的目标状态。详情页成功后也会刷新最近点赞用户。 [共用逻辑](../frontend/blog-like.js)
+
+在 Go 仓库根目录运行以下命令，从课程压缩包生成适配后的静态文件。第二个参数是输出目录，每次打包使用一个新目录。
+
+```bash
+python3 scripts/prepare-legacy-frontend.py ../资料/nginx-1.18.0.zip runtime/legacy-frontend
+```
+
+把 Nginx 的站点根目录设为输出目录，静态站点与 Go API 使用不同的监听端口。若 Go API 监听默认的 `8080`，静态站点可监听 `8088`。浏览器原有的 `/api` 请求前缀会由 Nginx 转发到 Go。部署时一起更新静态文件和后端。
+
+```nginx
+server {
+    listen 127.0.0.1:8088;
+    root /absolute/path/to/hmdp-go/runtime/legacy-frontend;
+    index index.html;
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8080/;
+    }
+}
+```
+
 ## 从源码读一次请求
 
-1. `changeLike` 在 GORM 事务中锁住博客行，读取当前用户是否点赞，再决定是否更新关系与点赞数。重复发送目标状态时，两者保持一致。 [博客实现](../internal/social/blog.go)
+1. `changeLike` 在 GORM 事务中锁住博客行，并在分桶模式下锁住该用户对应的计数桶，再读取当前用户是否点赞。只有状态发生变化才更新点赞关系和计数。重复发送目标状态时，两者保持一致。 [博客实现](../internal/social/blog.go)
 2. `feed` 把关注关系和博客联表查询，以 `b.id < cursor` 读取下一页。两条博客即使在同一秒发布，也能通过不同的 ID 确定顺序。请求下一页期间新发布的博客会出现在刷新后的第一页。 [动态接口](../internal/social/http.go)
 3. `commonFollows` 使用 Redis Set 求交集。MySQL 事务更新关注关系和缓存版本，后续请求读取新版本。缓存缺失时重建，Redis 失败时通过 MySQL 联表查询。 [关注实现](../internal/social/follow.go)
 4. 发布博客和写 Outbox 同时提交。Relay 收到 Kafka 确认后删除 Outbox，消费者按用户 ID 每批查 512 位关注者，通过 Redis pipeline 执行 Lua。每位用户的入队、裁剪和续期在一次 Lua 调用里完成。重新收到同一事件时，同一个成员只保留一份。查通知时核对当前关注关系。 [通知 Worker](../internal/social/notifications.go)

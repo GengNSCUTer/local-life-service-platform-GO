@@ -80,7 +80,11 @@ def verify(port, second, api_count, workload, next_blog):
     check("PUT", "/blog/like/1?liked=true", 1)
     check("PUT", "/blog/like/1?liked=true", 1)
     assert check("GET", "/blog/1", 1)["isLike"] and not check("GET", "/blog/1", 2)["isLike"]
+    check("PUT", "/blog/like/1", 1, status=400)
+    assert check("GET", "/blog/1", 1)["isLike"]
     check("DELETE", "/blog/like/1", 1)
+    check("DELETE", "/blog/like/1", 1)
+    check("PUT", "/blog/like/1?liked=false", 1)
     assert not check("GET", "/blog/1", 1)["isLike"]
     for viewer in ((1, 2, 3) if workload in ("feed", "smoke") else (3,)):
         page = check("GET", "/blog/of/follow", viewer)
@@ -143,7 +147,9 @@ def load(rate, duration, mode, first_user, ports):
             user = first_user + rng.randrange(4096)
             write = mode == "write" or (mode == "mixed" and rng.random() < .1)
             if write and rng.random() < .5:
-                args = ("like", "PUT" if rng.random() < .5 else "DELETE", f"/blog/like/{blog}?liked=true", user, None)
+                method = "PUT" if rng.random() < .5 else "DELETE"
+                path = f"/blog/like/{blog}"
+                args = ("like", method, path + "?liked=true" if method == "PUT" else path, user, None)
             elif write:
                 args = ("comment", "POST", f"/blog/{blog}/comments", user, {"content": "load"})
             elif mode == "feed":

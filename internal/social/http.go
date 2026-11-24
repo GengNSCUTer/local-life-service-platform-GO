@@ -210,18 +210,12 @@ func (s *Service) like(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var desired *bool
-	if state, exists := c.GetQuery("liked"); exists {
-		if state != "true" && state != "false" {
-			httpx.Respond(c, http.StatusBadRequest, "liked must be true or false", nil)
-			return
-		}
-		value := state == "true"
-		desired = &value
+	state := c.Query("liked")
+	if c.Request.Method == http.MethodPut && state != "true" && state != "false" {
+		httpx.Respond(c, http.StatusBadRequest, "liked must be true or false", nil)
+		return
 	}
-	if c.Request.Method == http.MethodDelete {
-		desired = new(bool)
-	}
+	desired := c.Request.Method == http.MethodPut && state == "true"
 	ctx, cancel, viewer := requestContext(c)
 	defer cancel()
 	s.respond(c, nil, s.changeLike(ctx, id, viewer, desired))

@@ -32,7 +32,7 @@ Compose 启动本地 MySQL、Redis 主节点、Redis 副本、三个 Redis Senti
 
 百万和千万请求的复现命令与测量口径见[秒杀接口压测](docs/04-seckill-benchmark.md)。
 
-博客、点赞、关注动态、附近店铺和签到见[阶段 5 学习与联调](docs/11-social-and-discovery.md)。
+博客、点赞、关注动态、附近店铺和签到见[阶段 5 学习与联调](docs/11-social-and-discovery.md)。原版页面可按[前端点赞适配说明](docs/11-social-and-discovery.md#原版前端的点赞按钮)打包运行。
 
 店铺 UV、博客评论和图片上传见[操作和源码入口](docs/19-uv-comments-media.md)。评论使用迁移 `011`。
 

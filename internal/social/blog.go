@@ -131,7 +131,7 @@ func (s *Service) blogs(ctx context.Context, viewer uint64) *gorm.DB {
 		Joins("LEFT JOIN social_blog_likes l ON l.blog_id = b.id AND l.user_id = ?", viewer)
 }
 
-func (s *Service) changeLike(ctx context.Context, blogID, viewer uint64, desired *bool) error {
+func (s *Service) changeLike(ctx context.Context, blogID, viewer uint64, desired bool) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := s.lockBlog(tx, blogID); err != nil {
 			return err
@@ -145,15 +145,11 @@ func (s *Service) changeLike(ctx context.Context, blogID, viewer uint64, desired
 		if err := tx.Table("social_blog_likes").Where("blog_id = ? AND user_id = ?", blogID, viewer).Count(&count).Error; err != nil {
 			return err
 		}
-		wanted := count == 0
-		if desired != nil {
-			wanted = *desired
-		}
-		if wanted == (count != 0) {
+		if desired == (count != 0) {
 			return nil
 		}
 		delta := 1
-		if wanted {
+		if desired {
 			if err := tx.Exec("INSERT INTO social_blog_likes (blog_id, user_id) VALUES (?, ?)", blogID, viewer).Error; err != nil {
 				return err
 			}

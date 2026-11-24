@@ -1,0 +1,141 @@
+--- a/index.html
++++ b/index.html
+@@ -42,3 +42,5 @@
+         <div class="blog-user-name">{{b.name}}</div>
+-        <div class="blog-liked" @click="addLike(b)">
++        <button type="button" class="blog-liked" @click="toggleBlogLike(b)"
++                style="border:0; background:none; padding:0; font:inherit; color:inherit"
++                :disabled="!!likePending[b.id]" :aria-pressed="b.isLike ? 'true' : 'false'" aria-label="点赞">
+           <svg t="1646634642977" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="2187" width="14" height="14">
+@@ -47,3 +49,3 @@
+           {{b.liked}}
+-        </div>
++        </button>
+       </div>
+@@ -58,2 +60,3 @@
+ <script src="./js/common.js"></script>
++<script src="./js/blog-like.js"></script>
+ <script src="./js/footer.js"></script>
+@@ -63,2 +66,3 @@
+     el: "#app",
++    mixins: [blogLikeMixin],
+     data: {
+@@ -94,22 +98,2 @@
+       },
+-      addLike(b) {
+-        axios.put("/blog/like/" +b.id)
+-          .then(({data}) => {
+-            this.queryBlogById(b)
+-          })
+-          .catch(err => {
+-            this.$message.error(err)
+-          })
+-      },
+-      queryBlogById(b) {
+-        axios.get("/blog/" + b.id)
+-          .then(({data}) => {
+-            b.liked = data.liked;
+-            b.isLike = data.isLike;
+-          })
+-          .catch(() => {
+-            this.$message.error
+-            b.liked ++;
+-          })
+-      },
+       onScroll(e) {
+--- a/blog-detail.html
++++ b/blog-detail.html
+@@ -136,3 +136,5 @@
+     <div class="foot-box">
+-      <div class="foot-view"  @click="addLike()">
++      <button type="button" class="foot-view" @click="addLike()"
++              style="border:0; background:none; padding:0; font:inherit; color:inherit"
++              :disabled="!blog.id || !!likePending[blog.id]" :aria-pressed="blog.isLike ? 'true' : 'false'" aria-label="点赞">
+         <svg t="1646634642977" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="2187" width="26" height="26">
+@@ -141,3 +143,3 @@
+         <span :class="{liked: blog.isLike}">{{blog.liked}}</span>
+-      </div>
++      </button>
+     </div>
+@@ -155,2 +157,3 @@
+ <script src="./js/common.js"></script>
++<script src="./js/blog-like.js"></script>
+ <script>
+@@ -163,2 +166,3 @@
+     el: "#app",
++    mixins: [blogLikeMixin],
+     data: {
+@@ -235,16 +239,6 @@
+       },
+-      addLike(){
+-        axios.put("/blog/like/" +this.blog.id)
+-          .then(({data}) => {
+-            axios.get("/blog/" + this.blog.id)
+-              .then(({data}) => {
+-                data.images = data.images.split(",")
+-                this.blog = data;
+-                this.queryLikeList(this.blog.id);
+-              })
+-              .catch(this.$message.error)
+-          })
+-          .catch(err => {
+-            this.$message.error(err)
+-          })
++      async addLike() {
++        if (await this.toggleBlogLike(this.blog)) {
++          this.queryLikeList(this.blog.id);
++        }
+       },
+--- a/info.html
++++ b/info.html
+@@ -79,3 +79,5 @@
+               <div class="blog-user-name">{{b.name}}</div>
+-              <div class="blog-liked" @click="addLike(b)">
++              <button type="button" class="blog-liked" @click="toggleBlogLike(b)"
++                      style="border:0; background:none; padding:0; font:inherit; color:inherit"
++                      :disabled="!!likePending[b.id]" :aria-pressed="b.isLike ? 'true' : 'false'" aria-label="点赞">
+                 <svg t="1646634642977" class="icon" viewBox="0 0 1024 1024" version="1.1"
+@@ -87,3 +89,3 @@
+                 {{b.liked}}
+-              </div>
++              </button>
+             </div>
+@@ -101,2 +103,3 @@
+ <script src="./js/common.js"></script>
++<script src="./js/blog-like.js"></script>
+ <script src="./js/footer.js"></script>
+@@ -105,2 +108,3 @@
+     el: "#app",
++    mixins: [blogLikeMixin],
+     data: {
+@@ -200,22 +204,2 @@
+         }
+-      },
+-      addLike(b) {
+-        axios.put("/blog/like/" + b.id)
+-          .then(({data}) => {
+-            this.queryBlogById(b);
+-          })
+-          .catch(err => {
+-            this.$message.error(err)
+-          })
+-      },
+-      queryBlogById(b) {
+-        axios.get("/blog/" + b.id)
+-          .then(({data}) => {
+-            b.liked = data.liked;
+-            b.isLike = data.isLike;
+-          })
+-          .catch(() => {
+-            this.$message.error
+-            b.liked++;
+-          })
+       },
+--- a/js/common.js
++++ b/js/common.js
+@@ -26,2 +26,5 @@
+   console.log(error)
++  if (!error.response) {
++    return Promise.reject("网络异常，请重试");
++  }
+   if(error.response.status == 401){
