@@ -47,6 +47,18 @@ func (s *Service) create(ctx context.Context, item Voucher, activity *seckill.Ac
 }
 
 func (s *Service) initialize(ctx context.Context, id uint64) error {
+	if err := s.initializeStock(ctx, id); err != nil {
+		return err
+	}
+	if err := s.repo.db.WithContext(ctx).Exec(`UPDATE voucher_stock_init_tasks
+		SET status = ?, due_at = NULL, lease_token = NULL WHERE voucher_id = ? AND status <> ?`,
+		stockReady, id, stockReady).Error; err != nil {
+		s.logger.Warn("acknowledge voucher stock initialization", "voucher_id", id, "error", err)
+	}
+	return nil
+}
+
+func (s *Service) initializeStock(ctx context.Context, id uint64) error {
 	activity, err := s.repo.findActivity(ctx, id)
 	if err != nil {
 		return err

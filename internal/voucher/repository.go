@@ -136,7 +136,10 @@ func attachActivity(tx *gorm.DB, id uint64, activity *seckill.Activity, configur
 	if err := seckill.InsertActivity(tx, configure(item)); err != nil {
 		return err
 	}
-	return tx.Exec("INSERT INTO voucher_seckill_links (voucher_id) VALUES (?)", id).Error
+	if err := tx.Exec("INSERT INTO voucher_seckill_links (voucher_id) VALUES (?)", id).Error; err != nil {
+		return err
+	}
+	return tx.Exec("INSERT INTO voucher_stock_init_tasks (voucher_id) VALUES (?)", id).Error
 }
 
 func (r repository) findActivity(ctx context.Context, id uint64) (seckill.Activity, error) {

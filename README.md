@@ -26,7 +26,7 @@ Compose 启动本地 MySQL、Redis 主节点、Redis 副本、三个 Redis Senti
 
 店铺分类、列表、详情与维护的迁移和联调见[店铺与缓存](docs/08-shop-and-cache.md)。
 
-创建普通券和秒杀活动、预热库存与查询订单历史见[优惠券、活动和订单查询](docs/09-voucher-and-order.md)。
+创建普通券和秒杀活动、库存预热重试与订单历史见[优惠券、活动和订单查询](docs/09-voucher-and-order.md)。升级前应用迁移 `016`。
 
 订单取消、pending 超时、补偿重试和异常订单处理见[秒杀订单生命周期](docs/10-order-lifecycle.md)。新库按顺序执行所有迁移。已有库按顺序补齐缺少的迁移。新活动可按配置启用[Redis 活动分片和 MySQL 库存桶](docs/18-seckill-sharding.md)。
 

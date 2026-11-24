@@ -14,9 +14,10 @@ import (
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/platform/observe"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/seckill"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/social"
+	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/voucher"
 )
 
-const backgroundLoops = 3
+const backgroundLoops = 4
 
 // RunWorker owns the background jobs and serves only health endpoints.
 func RunWorker(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr error) {
@@ -68,7 +69,8 @@ func RunWorker(ctx context.Context, cfg config.Config, logger *slog.Logger) (run
 	community.RegisterMetrics(registry, true)
 	workerCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancel()
-	done := startBackground(workerCtx, cfg, deps, service, community, func() { ready.Add(1) })
+	vouchers := voucher.New(deps.mysql, logger, cfg.VoucherAdminUserID, service)
+	done := startBackground(workerCtx, cfg, deps, service, community, vouchers, func() { ready.Add(1) })
 	logger.Info("worker health server listening", "addr", listener.Addr().String())
 
 	remaining := backgroundLoops
@@ -95,7 +97,7 @@ func RunWorker(ctx context.Context, cfg config.Config, logger *slog.Logger) (run
 	return runErr
 }
 
-func startBackground(ctx context.Context, cfg config.Config, deps *clients, service *seckill.Service, community *social.Service, ready func()) <-chan error {
+func startBackground(ctx context.Context, cfg config.Config, deps *clients, service *seckill.Service, community *social.Service, vouchers *voucher.Service, ready func()) <-chan error {
 	done := make(chan error, backgroundLoops)
 	go func() { done <- community.RunWorkers(ctx, cfg.KafkaBrokers, deps.kafka, deps.kafkaTransport, ready) }()
 	go func() {
@@ -104,6 +106,10 @@ func startBackground(ctx context.Context, cfg config.Config, deps *clients, serv
 	}()
 	go func() {
 		service.RunMonitoring(ctx, deps.kafka, cfg.InventoryAuditInterval)
+		done <- nil
+	}()
+	go func() {
+		vouchers.RunStockInitialization(ctx)
 		done <- nil
 	}()
 	return done

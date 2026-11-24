@@ -81,7 +81,8 @@ func runAPI(ctx context.Context, cfg config.Config, logger *slog.Logger, startWo
 		shops.EnableBreaker(registry)
 	}
 	shops.Register(router, requireLogin, users.VisitorLogin)
-	voucher.New(deps.mysql, logger, cfg.VoucherAdminUserID, service).Register(router, requireLogin)
+	vouchers := voucher.New(deps.mysql, logger, cfg.VoucherAdminUserID, service)
+	vouchers.Register(router, requireLogin)
 	community := social.New(deps.mysql, deps.redis, logger)
 	community.ConfigureCapacity(cfg.SocialCounterBuckets, cfg.SocialDetailCache, cfg.SocialBoundedFeed, cfg.SocialWriteLimit, cfg.SocialFanoutWorkers)
 	community.RegisterMetrics(registry, startWorkers)
@@ -91,7 +92,7 @@ func runAPI(ctx context.Context, cfg config.Config, logger *slog.Logger, startWo
 	community.Register(router, requireLogin, users.OptionalLogin())
 	if startWorkers {
 		workerCtx, stop := context.WithCancel(context.WithoutCancel(ctx))
-		done := startBackground(workerCtx, cfg, deps, service, community, func() {})
+		done := startBackground(workerCtx, cfg, deps, service, community, vouchers, func() {})
 		defer func() {
 			stop()
 			runErr = errors.Join(runErr, waitBackground(done, backgroundLoops))

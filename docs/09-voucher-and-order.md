@@ -4,7 +4,7 @@
 | --- | --- | --- |
 | `GET /voucher/list/:shopId` | 公开 | 列出店铺上架优惠券，Go 创建的秒杀券带库存和时间窗口 |
 | `POST /voucher` | 优惠券管理员 | 创建普通券，返回优惠券 ID |
-| `POST /voucher/seckill` | 优惠券管理员 | 创建优惠券和秒杀活动，预热库存，返回优惠券 ID |
+| `POST /voucher/seckill` | 优惠券管理员 | 创建优惠券和秒杀活动，登记预热任务并尝试立即预热，返回优惠券 ID |
 | `POST /voucher/seckill/:id/initialize` | 优惠券管理员 | 重新尝试初始化已创建活动的 Redis 库存 |
 | `POST /voucher-order/seckill/:id` | 登录用户 | 提交秒杀，预占成功返回 `202` 和 `orderId` |
 | `GET /voucher-order/:id` | 订单所属用户 | 查询待处理或已持久化订单 |
@@ -15,19 +15,24 @@
 ## 从源码跟一次请求
 
 1. Gin 校验 Token 后，`requireAdmin` 通过请求 `Context` 取用户 ID，并核对 `VOUCHER_ADMIN_USER_ID`。`createHandler` 解析 JSON。金额以分为单位，活动时间使用带时区的 RFC 3339 字符串。Go 把时间统一成 UTC，截断到 MySQL 保存的毫秒精度。 [接口](../internal/voucher/http.go) · [活动参数](../internal/voucher/service.go)
-2. GORM 的 `Transaction(func(tx *gorm.DB) error {...})` 把优惠券、活动和两者的关联放进同一个 MySQL 事务。回调返回错误时回滚。创建接口可带 `Idempotency-Key`，同一个键和同样的参数会复用第一次写入的 ID，换参数会收到 `409`。并发请求由 MySQL 的主键和事务协调。 [数据访问](../internal/voucher/repository.go)
-3. MySQL 事务提交后，Go 调用秒杀模块预热 Redis。Lua 发现相同活动已经初始化时保留剩余库存。Redis 初始化失败时，响应 `503` 的 `data` 会带已落库的优惠券 ID，可在开售前调用初始化接口，或带同一个创建请求键重试。开售后如果 Redis 库存键缺失，初始化会返回 `409`，避免按总库存重新开售。 [预热与抢券脚本](../internal/seckill/redis.go)
+2. GORM 的 `Transaction(func(tx *gorm.DB) error {...})` 把优惠券、活动、两者的关联和库存预热任务写进同一个 MySQL 事务。回调返回错误时回滚。创建接口可带 `Idempotency-Key`，同一个键和同样的参数会复用第一次写入的 ID，换参数会收到 `409`。并发请求由 MySQL 的主键和事务协调。 [数据访问](../internal/voucher/repository.go)
+3. MySQL 事务提交后，Go 调用秒杀模块预热 Redis。Lua 发现相同活动已经初始化时保留剩余库存。Redis 初始化失败时，响应 `503` 的 `data` 会带已落库的优惠券 ID，Worker 会继续尝试。管理员仍可在开售前调用初始化接口，或带同一个创建请求键重试。开售后如果 Redis 库存键缺失，初始化会返回 `409`，避免按总库存重新开售。 [预热与抢券脚本](../internal/seckill/redis.go)
 4. 用户抢券时，Redis Lua 用 Redis 的时间检查活动窗口，核对一人一单并预占库存。成功后由 Worker 通过 Kafka 异步写 MySQL。详情接口可查 `pending`，历史接口从 MySQL 查询。MySQL 使用条件更新和唯一索引落单，最后一件卖完后，同一订单消息重放仍可识别为已处理。 [秒杀接口](../internal/seckill/http.go) · [落单事务](../internal/seckill/store.go)
+
+## Redis 预热失败后如何恢复
+
+`voucher_stock_init_tasks` 是 MySQL 中的任务表。`cmd/worker` 和 `cmd/all` 都启动预热循环，申领后提交 MySQL 事务，随后调用 Redis。多实例通过短租约协调，Worker 在处理中退出时，租约到期后其他实例可继续。等待重试的间隔依次为 1、2、4 秒，上限 8 秒。预热只依赖 MySQL 和 Redis。 [Worker](../internal/voucher/stock_init.go)
+
+`pending` 表示正在等待或重试，`ready` 表示 Redis 已确认库存，`missed_window` 表示开售后检查时发现 Redis 库存键缺失。Worker 遇到 `missed_window` 会写日志并结束该任务，由运营核实活动和库存后处理。升级前应用迁移 `016`，它也会为此前创建且尚未开售的秒杀券补建任务。 [迁移](../migrations/016_voucher_stock_init_tasks.sql)
 
 ## 本地体验
 
-新库按编号应用迁移 `001` 至 `008`。已经完成阶段 3 时执行新增迁移。应用的秒杀 Worker 会在后台创建所需 Kafka 主题，新业务活动可直接通过 HTTP 创建。原来的 `prepare-seckill` 命令用于隔离环境的压测和故障演练。
+新库按编号应用所有迁移，已有库补齐缺少的迁移。应用的秒杀 Worker 会在后台创建所需 Kafka 主题，新业务活动可直接通过 HTTP 创建。原来的 `prepare-seckill` 命令用于隔离环境的压测和故障演练。
 
 ```bash
-docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/005_voucher.sql
-docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/006_order_lifecycle.sql
-docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/007_reservation_anomalies.sql
-docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < migrations/008_social.sql
+for migration in migrations/*.sql; do
+  docker compose exec -T mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE"' < "$migration"
+done
 SHOP_ADMIN_USER_ID=7 VOUCHER_ADMIN_USER_ID=7 AUTH_DEV_LOG_CODES=true go run ./cmd/all
 ```
 
@@ -66,4 +71,12 @@ curl -fsS -H "Authorization: Bearer $buyer_token" "$base/voucher-order?current=1
 ```bash
 # 将 HMDP_SECKILL_TEST_DSN 设置为应用过 001 和 006 迁移的隔离数据库连接字符串。
 go test -race ./internal/seckill -run TestPersistOrderCanBeReplayedAfterStockReachesZero -count=1 -v
+```
+
+以下回归覆盖 Redis 连接失败后，新的 Worker 在原活动开售前为同一张券恢复库存。使用已应用全部迁移的隔离 MySQL 和 Redis 实例。
+
+```bash
+HMDP_VOUCHER_TEST_DSN='hmdp@tcp(127.0.0.1:23306)/hmdp_test?parseTime=true' \
+HMDP_VOUCHER_TEST_REDIS_ADDR=127.0.0.1:26379 \
+go test -race ./internal/voucher -run TestStockInitializationRecoversAfterRedisFailure -count=1 -v
 ```
