@@ -54,6 +54,11 @@ func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafk
 	var workers sync.WaitGroup
 	workers.Go(func() { s.relay(ctx, writer) })
 	workers.Go(func() { s.consume(ctx, reader) })
+	workers.Go(func() { s.counterWorker(ctx) })
+	workers.Go(func() { s.rankWorker(ctx) })
+	for range s.fanoutWorkers {
+		workers.Go(func() { s.fanoutWorker(ctx) })
+	}
 	started()
 	workers.Wait()
 	return errors.Join(reader.Close(), writer.Close())
@@ -104,11 +109,18 @@ func (s *Service) consume(ctx context.Context, reader *kafka.Reader) {
 			s.logger.Warn("invalid social Kafka event", "partition", message.Partition, "offset", message.Offset)
 		} else {
 			for ctx.Err() == nil {
-				err := s.notifyFollowers(ctx, event)
+				var err error
+				if s.fanoutWorkers > 0 {
+					operation, cancel := context.WithTimeout(ctx, 5*time.Second)
+					err = s.enqueueFanout(operation, event)
+					cancel()
+				} else {
+					err = s.notifyFollowers(ctx, event)
+				}
 				if err == nil {
 					break
 				}
-				s.logger.Warn("retry blog notifications", "blog_id", event.BlogID, "error", err)
+				s.logger.Warn("retry social notification event", "blog_id", event.BlogID, "error", err)
 				wait(ctx, time.Second)
 			}
 		}
@@ -138,31 +150,34 @@ return 1
 `)
 
 func (s *Service) notifyFollowers(ctx context.Context, event publishedBlog) error {
-	const batchSize = 512
-	const ttlSeconds = int(notificationRetention / time.Second)
-	blogID := strconv.FormatUint(event.BlogID, 10)
-	publishedAt := event.CreatedAt.UnixMilli()
 	var last uint64
 	for ctx.Err() == nil {
 		operation, cancel := context.WithTimeout(ctx, 5*time.Second)
-		var followers []uint64
-		err := s.db.WithContext(operation).Table("social_follows").Where("follow_user_id = ? AND user_id > ?", event.AuthorID, last).
-			Order("user_id").Limit(batchSize).Pluck("user_id", &followers).Error
-		if err == nil && len(followers) != 0 {
-			_, err = s.cache.Pipelined(operation, func(pipe redis.Pipeliner) error {
-				for _, id := range followers {
-					storeNotification.Eval(operation, pipe, []string{notificationKey(id)}, publishedAt, blogID, ttlSeconds)
-				}
-				return nil
-			})
-		}
+		followers, err := s.notifyBatch(operation, event, last)
 		cancel()
-		if err != nil || len(followers) < batchSize {
+		if err != nil || len(followers) < fanoutBatchSize {
 			return err
 		}
 		last = followers[len(followers)-1]
 	}
 	return ctx.Err()
+}
+
+func (s *Service) notifyBatch(ctx context.Context, event publishedBlog, last uint64) ([]uint64, error) {
+	var followers []uint64
+	err := s.db.WithContext(ctx).Table("social_follows").Where("follow_user_id = ? AND user_id > ?", event.AuthorID, last).
+		Order("user_id").Limit(fanoutBatchSize).Pluck("user_id", &followers).Error
+	if err != nil || len(followers) == 0 {
+		return followers, err
+	}
+	blogID := strconv.FormatUint(event.BlogID, 10)
+	_, err = s.cache.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		for _, id := range followers {
+			storeNotification.Eval(ctx, pipe, []string{notificationKey(id)}, event.CreatedAt.UnixMilli(), blogID, int(notificationRetention/time.Second))
+		}
+		return nil
+	})
+	return followers, err
 }
 
 func (s *Service) notifications(c *gin.Context) {

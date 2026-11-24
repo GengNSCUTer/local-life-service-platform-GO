@@ -52,10 +52,19 @@ func validURL(u *url.URL) bool {
 	return (u.Scheme == "https" || u.Scheme == "http") && u.Host != "" && u.User == nil && u.RawQuery == "" && u.Fragment == ""
 }
 
-func (s *Store) Register(router *gin.Engine, login gin.HandlerFunc, logger *slog.Logger) {
+func (s *Store) Register(router *gin.Engine, login gin.HandlerFunc, logger *slog.Logger, limit int) {
+	slots := make(chan struct{}, max(1, limit))
 	router.POST("/media/images", login, func(c *gin.Context) {
 		if s == nil {
 			httpx.Respond(c, http.StatusServiceUnavailable, "image storage is disabled", nil)
+			return
+		}
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+		default:
+			c.Header("Retry-After", "1")
+			httpx.Respond(c, http.StatusServiceUnavailable, "image uploads temporarily overloaded", nil)
 			return
 		}
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxImageSize+(64<<10))

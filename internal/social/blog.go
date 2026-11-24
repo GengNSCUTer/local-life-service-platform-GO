@@ -11,7 +11,6 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 const pageSize = 10
@@ -20,14 +19,28 @@ var errInvalidShop = errors.New("shop not found")
 var errInvalidFollow = errors.New("follow target must be another existing user")
 
 type Service struct {
-	db          *gorm.DB
-	cache       *redis.Client
-	logger      *slog.Logger
-	pullAuthors map[uint64]struct{}
+	db             *gorm.DB
+	cache          *redis.Client
+	logger         *slog.Logger
+	pullAuthors    map[uint64]struct{}
+	bucketCounters bool
+	detailCache    bool
+	boundedFeed    bool
+	writeSlots     chan struct{}
+	fanoutWorkers  int
+	metrics        *metrics
 }
 
 func New(db *gorm.DB, cache *redis.Client, logger *slog.Logger) *Service {
 	return &Service{db: db, cache: cache, logger: logger}
+}
+
+func (s *Service) ConfigureCapacity(buckets, detailCache, boundedFeed bool, writeLimit, fanoutWorkers int) {
+	s.bucketCounters, s.detailCache, s.boundedFeed = buckets, detailCache, boundedFeed
+	if writeLimit > 0 {
+		s.writeSlots = make(chan struct{}, writeLimit)
+	}
+	s.fanoutWorkers = fanoutWorkers
 }
 
 // ConfigurePullAuthors runs before routes are registered.
@@ -116,9 +129,13 @@ func (s *Service) blogs(ctx context.Context, viewer uint64) *gorm.DB {
 
 func (s *Service) changeLike(ctx context.Context, blogID, viewer uint64, desired *bool) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var item struct{ ID uint64 }
-		if err := tx.Table("tb_blog").Clauses(clause.Locking{Strength: "UPDATE"}).Select("id").Take(&item, "id = ?", blogID).Error; err != nil {
+		if err := s.lockBlog(tx, blogID); err != nil {
 			return err
+		}
+		if s.bucketCounters {
+			if err := lockCounter(tx, blogID, viewer); err != nil {
+				return err
+			}
 		}
 		var count int64
 		if err := tx.Table("social_blog_likes").Where("blog_id = ? AND user_id = ?", blogID, viewer).Count(&count).Error; err != nil {
@@ -142,6 +159,6 @@ func (s *Service) changeLike(ctx context.Context, blogID, viewer uint64, desired
 				return err
 			}
 		}
-		return tx.Exec("UPDATE tb_blog SET liked = GREATEST(CAST(COALESCE(liked, 0) AS SIGNED) + ?, 0) WHERE id = ?", delta, blogID).Error
+		return s.changeCounters(tx, blogID, viewer, delta, 0)
 	})
 }

@@ -16,23 +16,39 @@ import (
 
 func (s *Service) Register(router *gin.Engine, login, optionalLogin gin.HandlerFunc) {
 	blogs := router.Group("/blog")
-	blogs.POST("", login, s.create)
+	blogs.POST("", s.limitWrites, login, s.create)
 	blogs.GET("/:id", optionalLogin, s.detail)
-	blogs.POST("/:id/comments", login, s.createComment)
+	blogs.POST("/:id/comments", s.limitWrites, login, s.createComment)
 	blogs.GET("/:id/comments", s.listComments)
-	blogs.DELETE("/:id/comments/:commentId", login, s.deleteComment)
+	blogs.DELETE("/:id/comments/:commentId", s.limitWrites, login, s.deleteComment)
 	blogs.GET("/hot", optionalLogin, s.hot)
 	blogs.GET("/of/user", optionalLogin, s.list)
 	blogs.GET("/of/me", login, s.list)
 	blogs.GET("/of/follow", login, s.feed)
 	blogs.GET("/notifications", login, s.notifications)
 	blogs.GET("/likes/:id", s.likes)
-	blogs.PUT("/like/:id", login, s.like)
-	blogs.DELETE("/like/:id", login, s.like)
+	blogs.PUT("/like/:id", s.limitWrites, login, s.like)
+	blogs.DELETE("/like/:id", s.limitWrites, login, s.like)
 	follows := router.Group("/follow", login)
-	follows.PUT("/:id/:state", s.follow)
+	follows.PUT("/:id/:state", s.limitWrites, s.follow)
 	follows.GET("/or/not/:id", s.isFollowing)
 	follows.GET("/common/:id", s.common)
+}
+
+func (s *Service) limitWrites(c *gin.Context) {
+	if s.writeSlots == nil {
+		c.Next()
+		return
+	}
+	select {
+	case s.writeSlots <- struct{}{}:
+		defer func() { <-s.writeSlots }()
+		c.Next()
+	default:
+		c.Abort()
+		c.Header("Retry-After", "1")
+		httpx.Respond(c, http.StatusServiceUnavailable, "social writes temporarily overloaded", nil)
+	}
 }
 
 func requestContext(c *gin.Context) (context.Context, context.CancelFunc, uint64) {
@@ -85,8 +101,7 @@ func (s *Service) detail(c *gin.Context) {
 	}
 	ctx, cancel, viewer := requestContext(c)
 	defer cancel()
-	var item blogView
-	err := s.blogs(ctx, viewer).Take(&item, "b.id = ?", id).Error
+	item, err := s.loadDetail(ctx, id, viewer)
 	s.respond(c, item, err)
 }
 
@@ -124,7 +139,7 @@ type feedPage struct {
 func (s *Service) feed(c *gin.Context) {
 	ctx, cancel, viewer := requestContext(c)
 	defer cancel()
-	query := s.blogs(ctx, viewer).Joins("JOIN social_follows f ON f.follow_user_id = b.user_id AND f.user_id = ?", viewer)
+	var before uint64
 	cursor := c.Query("cursor")
 	if cursor == "" {
 		cursor = c.Query("lastId")
@@ -137,7 +152,36 @@ func (s *Service) feed(c *gin.Context) {
 		if !ok {
 			return
 		}
-		query = query.Where("b.id < ?", id)
+		before = id
+	}
+	query := s.blogs(ctx, viewer)
+	if s.boundedFeed {
+		var ids []uint64
+		condition := ""
+		var args []any
+		if before != 0 {
+			condition = " AND candidate.id < ?"
+			args = append(args, before)
+		}
+		args = append(args, viewer)
+		err := s.db.WithContext(ctx).Raw(`SELECT recent.id FROM social_follows AS f
+			JOIN LATERAL (SELECT candidate.id FROM tb_blog AS candidate FORCE INDEX (idx_blog_author)
+			WHERE candidate.user_id = f.follow_user_id`+condition+` ORDER BY candidate.id DESC LIMIT 11) AS recent ON TRUE
+			WHERE f.user_id = ? ORDER BY recent.id DESC LIMIT 11`, args...).Scan(&ids).Error
+		if err != nil {
+			s.respond(c, nil, err)
+			return
+		}
+		if len(ids) == 0 {
+			s.respond(c, feedPage{List: []blogView{}}, nil)
+			return
+		}
+		query = query.Where("b.id IN ?", ids)
+	} else {
+		query = query.Joins("JOIN social_follows f ON f.follow_user_id = b.user_id AND f.user_id = ?", viewer)
+		if before != 0 {
+			query = query.Where("b.id < ?", before)
+		}
 	}
 	page := feedPage{List: make([]blogView, 0)}
 	err := query.Order("b.id DESC").Limit(pageSize + 1).Find(&page.List).Error

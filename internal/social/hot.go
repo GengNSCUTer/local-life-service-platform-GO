@@ -15,6 +15,14 @@ type hotPage struct {
 }
 
 func (s *Service) hot(c *gin.Context) {
+	if c.Query("snapshot") == "true" {
+		if _, hasCurrent := c.GetQuery("current"); hasCurrent {
+			httpx.Respond(c, http.StatusBadRequest, "use snapshot cursor or current", nil)
+			return
+		}
+		s.snapshotHot(c)
+		return
+	}
 	ctx, cancel, viewer := requestContext(c)
 	defer cancel()
 	cursor, cursorMode := c.GetQuery("cursor")

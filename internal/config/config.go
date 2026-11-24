@@ -30,6 +30,12 @@ type Config struct {
 	MediaBucket            string
 	MediaPublicURL         string
 	SocialPullAuthorIDs    string
+	SocialCounterBuckets   bool
+	SocialDetailCache      bool
+	SocialBoundedFeed      bool
+	SocialWriteLimit       int
+	SocialFanoutWorkers    int
+	MediaUploadLimit       int
 	TraceEndpoint          string
 	TraceSampleRatio       float64
 	AuthCodeIPLimit        int
@@ -87,6 +93,9 @@ func Load() Config {
 		traceRatio = 0.01
 	}
 	shopBreaker, _ := strconv.ParseBool(env("SHOP_MYSQL_BREAKER", "true"))
+	socialBuckets, _ := strconv.ParseBool(env("SOCIAL_COUNTER_BUCKETS", "true"))
+	socialCache, _ := strconv.ParseBool(env("SOCIAL_DETAIL_CACHE", "true"))
+	socialFeed, _ := strconv.ParseBool(env("SOCIAL_BOUNDED_FEED", "false"))
 	return Config{
 		HTTPAddr:               env("HTTP_ADDR", "127.0.0.1:8080"),
 		HTTPIdleTimeout:        durationEnv("HTTP_IDLE_TIMEOUT", time.Minute),
@@ -108,6 +117,12 @@ func Load() Config {
 		MediaBucket:            env("MEDIA_S3_BUCKET", ""),
 		MediaPublicURL:         env("MEDIA_PUBLIC_URL", ""),
 		SocialPullAuthorIDs:    env("SOCIAL_PULL_AUTHOR_IDS", ""),
+		SocialCounterBuckets:   socialBuckets,
+		SocialDetailCache:      socialCache,
+		SocialBoundedFeed:      socialFeed,
+		SocialWriteLimit:       nonNegativeIntEnv("SOCIAL_WRITE_CONCURRENCY", 12),
+		SocialFanoutWorkers:    min(nonNegativeIntEnv("SOCIAL_FANOUT_WORKERS", 2), 8),
+		MediaUploadLimit:       positiveIntEnv("MEDIA_UPLOAD_CONCURRENCY", 2),
 		TraceEndpoint:          env("TRACE_OTLP_ENDPOINT", ""),
 		TraceSampleRatio:       traceRatio,
 		AuthCodeIPLimit:        nonNegativeIntEnv("AUTH_CODE_IP_LIMIT", 20),

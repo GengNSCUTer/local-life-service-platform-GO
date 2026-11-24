@@ -74,7 +74,7 @@ func runAPI(ctx context.Context, cfg config.Config, logger *slog.Logger, startWo
 	if err != nil {
 		return err
 	}
-	images.Register(router, requireLogin, logger)
+	images.Register(router, requireLogin, logger, cfg.MediaUploadLimit)
 	service.Register(router, requireLogin, limits.SeckillByUser(cfg.SeckillUserLimit))
 	shops := shop.New(deps.mysql, deps.redis, logger, cfg.ShopAdminUserID)
 	if cfg.ShopBreakerEnabled {
@@ -83,6 +83,8 @@ func runAPI(ctx context.Context, cfg config.Config, logger *slog.Logger, startWo
 	shops.Register(router, requireLogin, users.VisitorLogin)
 	voucher.New(deps.mysql, logger, cfg.VoucherAdminUserID, service).Register(router, requireLogin)
 	community := social.New(deps.mysql, deps.redis, logger)
+	community.ConfigureCapacity(cfg.SocialCounterBuckets, cfg.SocialDetailCache, cfg.SocialBoundedFeed, cfg.SocialWriteLimit, cfg.SocialFanoutWorkers)
+	community.RegisterMetrics(registry, startWorkers)
 	if err := community.ConfigurePullAuthors(cfg.SocialPullAuthorIDs); err != nil {
 		return err
 	}

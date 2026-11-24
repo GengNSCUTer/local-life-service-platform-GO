@@ -1,6 +1,7 @@
 package social
 
 import (
+	"crypto/sha256"
 	"errors"
 	"net/http"
 	"strconv"
@@ -15,18 +16,22 @@ import (
 )
 
 type comment struct {
-	ID        uint64     `json:"id"`
-	BlogID    uint64     `json:"blogId"`
-	AuthorID  uint64     `json:"authorId"`
-	ParentID  *uint64    `json:"parentId,omitempty"`
-	Content   string     `json:"content"`
-	CreatedAt time.Time  `json:"createdAt" gorm:"->"`
-	DeletedAt *time.Time `json:"deletedAt,omitempty"`
+	ID               uint64     `json:"id"`
+	BlogID           uint64     `json:"blogId"`
+	AuthorID         uint64     `json:"authorId"`
+	ParentID         *uint64    `json:"parentId,omitempty"`
+	ReplyToCommentID *uint64    `json:"replyToCommentId,omitempty"`
+	RequestKey       []byte     `json:"-"`
+	RequestDigest    []byte     `json:"-"`
+	Content          string     `json:"content"`
+	CreatedAt        time.Time  `json:"createdAt" gorm:"->"`
+	DeletedAt        *time.Time `json:"deletedAt,omitempty"`
 }
 
 const commentTable = "social_blog_comments"
 
 var errCommentOwner = errors.New("comment author required")
+var errCommentRequestConflict = errors.New("idempotency key was already used for a different comment")
 
 func (s *Service) createComment(c *gin.Context) {
 	blogID, ok := positiveID(c, c.Param("id"))
@@ -49,22 +54,58 @@ func (s *Service) createComment(c *gin.Context) {
 	}
 	ctx, cancel, viewer := requestContext(c)
 	defer cancel()
-	item := comment{BlogID: blogID, AuthorID: viewer, ParentID: body.ParentID, Content: body.Content}
+	item := comment{BlogID: blogID, AuthorID: viewer, Content: body.Content}
+	if key := c.GetHeader("Idempotency-Key"); key != "" {
+		if len(key) > 128 {
+			httpx.Respond(c, http.StatusBadRequest, "invalid idempotency key", nil)
+			return
+		}
+		keyDigest := sha256.Sum256([]byte(key))
+		var target string
+		if body.ParentID != nil {
+			target = strconv.FormatUint(*body.ParentID, 10)
+		}
+		bodyDigest := sha256.Sum256([]byte(target + "\x00" + item.Content))
+		item.RequestKey, item.RequestDigest = keyDigest[:], bodyDigest[:]
+	}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var blog Blog
-		if err := tx.Table("tb_blog").Clauses(clause.Locking{Strength: "UPDATE"}).Select("id").Take(&blog, "id = ?", blogID).Error; err != nil {
+		if err := s.lockBlog(tx, blogID); err != nil {
 			return err
 		}
-		if item.ParentID != nil {
-			var parent comment
-			if err := tx.Table(commentTable).Take(&parent, "id = ? AND blog_id = ? AND parent_id IS NULL AND deleted_at IS NULL", *item.ParentID, blogID).Error; err != nil {
+		if s.bucketCounters {
+			if err := lockCounter(tx, blogID, viewer); err != nil {
 				return err
 			}
+		}
+		if len(item.RequestKey) != 0 {
+			var existing comment
+			err := tx.Table(commentTable).Select("id, request_digest").Take(&existing, "blog_id = ? AND author_id = ? AND request_key = ?", blogID, viewer, item.RequestKey).Error
+			if err == nil {
+				if string(existing.RequestDigest) != string(item.RequestDigest) {
+					return errCommentRequestConflict
+				}
+				item.ID = existing.ID
+				return nil
+			}
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+		}
+		if body.ParentID != nil {
+			var parent comment
+			if err := tx.Table(commentTable).Clauses(clause.Locking{Strength: "SHARE"}).Select("id, parent_id").Take(&parent, "id = ? AND blog_id = ? AND deleted_at IS NULL", *body.ParentID, blogID).Error; err != nil {
+				return err
+			}
+			item.ParentID = &parent.ID
+			if parent.ParentID != nil {
+				item.ParentID = parent.ParentID
+			}
+			item.ReplyToCommentID = body.ParentID
 		}
 		if err := tx.Table(commentTable).Create(&item).Error; err != nil {
 			return err
 		}
-		return tx.Exec("UPDATE tb_blog SET comments = COALESCE(comments, 0) + 1 WHERE id = ?", blogID).Error
+		return s.changeCounters(tx, blogID, viewer, 0, 1)
 	})
 	if err != nil {
 		s.commentError(c, err)
@@ -105,6 +146,11 @@ func (s *Service) listComments(c *gin.Context) {
 		s.commentError(c, err)
 		return
 	}
+	for i := range items {
+		if items[i].ReplyToCommentID == nil {
+			items[i].ReplyToCommentID = items[i].ParentID
+		}
+	}
 	result := gin.H{}
 	if len(items) > 20 {
 		items = items[:20]
@@ -126,12 +172,16 @@ func (s *Service) deleteComment(c *gin.Context) {
 	ctx, cancel, viewer := requestContext(c)
 	defer cancel()
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var blog Blog
-		if err := tx.Table("tb_blog").Clauses(clause.Locking{Strength: "UPDATE"}).Select("id").Take(&blog, "id = ?", blogID).Error; err != nil {
+		if err := s.lockBlog(tx, blogID); err != nil {
 			return err
 		}
+		if s.bucketCounters {
+			if err := lockCounter(tx, blogID, viewer); err != nil {
+				return err
+			}
+		}
 		var item comment
-		if err := tx.Table(commentTable).Take(&item, "id = ? AND blog_id = ?", commentID, blogID).Error; err != nil {
+		if err := tx.Table(commentTable).Clauses(clause.Locking{Strength: "UPDATE"}).Take(&item, "id = ? AND blog_id = ?", commentID, blogID).Error; err != nil {
 			return err
 		}
 		if item.AuthorID != viewer {
@@ -143,7 +193,7 @@ func (s *Service) deleteComment(c *gin.Context) {
 		if err := tx.Table(commentTable).Where("id = ?", commentID).Updates(map[string]any{"deleted_at": time.Now().UTC(), "content": ""}).Error; err != nil {
 			return err
 		}
-		return tx.Exec("UPDATE tb_blog SET comments = GREATEST(CAST(COALESCE(comments, 0) AS SIGNED) - 1, 0) WHERE id = ?", blogID).Error
+		return s.changeCounters(tx, blogID, viewer, 0, -1)
 	})
 	if err != nil {
 		s.commentError(c, err)
@@ -153,6 +203,10 @@ func (s *Service) deleteComment(c *gin.Context) {
 }
 
 func (s *Service) commentError(c *gin.Context, err error) {
+	if errors.Is(err, errCommentRequestConflict) {
+		httpx.Respond(c, http.StatusConflict, err.Error(), nil)
+		return
+	}
 	if errors.Is(err, errCommentOwner) {
 		httpx.Respond(c, http.StatusForbidden, err.Error(), nil)
 		return

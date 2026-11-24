@@ -6,7 +6,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 : "${KAFKA_BIN_DIR:?set KAFKA_BIN_DIR to the Kafka bin directory}"
 redis_bin=${REDIS_BIN_DIR:-/usr/bin}
 mode=${1:-restore}
-case "$mode" in restore|soak|capacity|catalog|social|orders|worker-scale) ;; *) echo 'usage: scripts/stage7-local.sh [restore|soak|capacity|catalog|social|orders|worker-scale]' >&2; exit 2 ;; esac
+case "$mode" in restore|soak|capacity|catalog|social|social-hot|orders|worker-scale) ;; *) echo 'usage: scripts/stage7-local.sh [restore|soak|capacity|catalog|social|social-hot|orders|worker-scale]' >&2; exit 2 ;; esac
 port=${STAGE7_BASE_PORT:-29840}
 export SECKILL_REDIS_SHARDED=false SECKILL_REDIS_CLUSTER_ADDRS= SECKILL_STOCK_BUCKETS=1
 test_cluster=0
@@ -130,9 +130,9 @@ start_mysql() {
 }
 run_mysql() {
     local -a options=()
-    if [[ "$mode" == orders || "$mode" == worker-scale ]]; then
+    if [[ "$mode" == orders || "$mode" == worker-scale || "$mode" == social-hot ]]; then
         options+=(--innodb-buffer-pool-size=1G)
-        if [[ "$mode" == orders && ${ORDER_TEST_DURABLE:-0} == 1 ]]; then
+        if [[ "$mode" == social-hot || ( "$mode" == orders && ${ORDER_TEST_DURABLE:-0} == 1 ) ]]; then
             options+=(--innodb-flush-log-at-trx-commit=1 --sync-binlog=1)
         else
             options+=(--innodb-flush-log-at-trx-commit=2 --sync-binlog=0)
@@ -276,6 +276,11 @@ start_worker
 if [[ "$mode" == catalog ]]; then
     source scripts/catalog-scenarios.sh
     run_catalog
+    exit 0
+fi
+if [[ "$mode" == social-hot ]]; then
+    source scripts/social-hot.sh
+    run_social_hot
     exit 0
 fi
 if [[ "$mode" == social ]]; then

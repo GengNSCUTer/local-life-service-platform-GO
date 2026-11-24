@@ -53,7 +53,7 @@ type orderEvent struct {
 	VoucherID    uint64            `json:"voucher_id"`
 	UserID       uint64            `json:"user_id"`
 	CreatedAt    time.Time         `json:"occurred_at"`
-	TraceHeaders map[string]string `json:"trace,omitempty"`
+	TraceHeaders map[string]string `json:"trace,omitempty" gorm:"-"`
 }
 
 func (e orderEvent) valid(id string) bool {
