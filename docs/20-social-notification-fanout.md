@@ -16,3 +16,16 @@ SOCIAL_TEST_FOLLOWERS=100000 SOCIAL_PULL_AUTHOR_IDS=2 scripts/stage7-local.sh so
 SOCIAL_TEST_FOLLOWERS=1000000 SOCIAL_PULL_AUTHOR_IDS= scripts/stage7-local.sh social
 SOCIAL_TEST_FOLLOWERS=1000000 SOCIAL_PULL_AUTHOR_IDS=2 scripts/stage7-local.sh social
 ```
+
+## 3090 对照结果
+
+同一台 3090 上每轮启动一个 API、一个 Worker、MySQL 8.0.33、Redis 7.2.11 和 Kafka 4.1.2。Redis 启用 AOF `always`，Kafka 为单 Broker 三分区。每轮重新建立合成数据，以下时间从各自发帖请求开始计算。
+
+| 热门作者粉丝 | 模式 | 第三篇到尾部样本 | 普通作者通知可见 | Redis ZADD | 首 200 次读 P99 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 100,000 | 推送 | 67.605 秒 | 67.588 秒 | 300,002 | 250.256 ms |
+| 100,000 | 推拉结合 | 0.064 秒 | 1.757 秒 | 2 | 5.018 ms |
+| 1,000,000 | 推送 | 115.866 秒 | 115.912 秒 | 3,000,002 | 15.770 ms |
+| 1,000,000 | 推拉结合 | 0.064 秒 | 0.409 秒 | 2 | 4.724 ms |
+
+推送组有数据的 Kafka 分区最终 lag 为 0，采样最大单分区 lag 为 2，部分早期采样的 offset 尚未提交。推拉组采到并在结束时核对的 lag 为 0。四轮均通过头尾样本、通知排序、去重、取关及 MySQL Outbox 归零检查。普通作者的两个关注者仍收到推送。每组运行一次，主机负载会波动。读流量来自三个轮询账号，每秒约 20 次，百万指关注关系数。
