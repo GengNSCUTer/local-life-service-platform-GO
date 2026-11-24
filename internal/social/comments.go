@@ -131,7 +131,8 @@ func (s *Service) listComments(c *gin.Context) {
 		s.commentError(c, err)
 		return
 	}
-	query := s.db.WithContext(ctx).Table(commentTable+" FORCE INDEX (idx_comment_page)").Where("blog_id = ? AND id > ?", blogID, after)
+	query := s.db.WithContext(ctx).Table(commentTable+" FORCE INDEX (idx_comment_page)").
+		Select("id, blog_id, author_id, parent_id, reply_to_comment_id, content, created_at, deleted_at").Where("blog_id = ? AND id > ?", blogID, after)
 	if parent := c.Query("parentId"); parent != "" {
 		id, ok := positiveID(c, parent)
 		if !ok {

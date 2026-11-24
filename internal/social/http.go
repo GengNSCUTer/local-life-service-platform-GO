@@ -46,6 +46,9 @@ func (s *Service) limitWrites(c *gin.Context) {
 		c.Next()
 	default:
 		c.Abort()
+		if s.metrics != nil {
+			s.metrics.writeRejected.Inc()
+		}
 		c.Header("Retry-After", "1")
 		httpx.Respond(c, http.StatusServiceUnavailable, "social writes temporarily overloaded", nil)
 	}

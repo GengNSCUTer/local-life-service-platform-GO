@@ -29,5 +29,29 @@ SOCIAL_COUNTER_BUCKETS=false SOCIAL_DETAIL_CACHE=false scripts/stage7-local.sh s
 SOCIAL_COUNTER_BUCKETS=true SOCIAL_DETAIL_CACHE=false scripts/stage7-local.sh social-hot
 SOCIAL_COUNTER_BUCKETS=false SOCIAL_DETAIL_CACHE=true scripts/stage7-local.sh social-hot
 SOCIAL_COUNTER_BUCKETS=true SOCIAL_DETAIL_CACHE=true scripts/stage7-local.sh social-hot
+SOCIAL_HOT_WORKLOAD=matrix SOCIAL_HOT_SECONDS=5 SOCIAL_WRITE_CONCURRENCY=0 scripts/stage7-local.sh social-hot
 SOCIAL_HOT_SECONDS=3600 SOCIAL_HOT_RATE=200 SOCIAL_HOT_ORDER_RATE=2 scripts/stage7-local.sh social-hot
 ```
+
+## 3090 短压与故障验证
+
+测试使用本机隔离的 MySQL 8.0.33、Redis 7.2.11 和 Kafka 4.1.2，以下容量矩阵的中间件数据位于 tmpfs，MySQL 配置提交刷盘，Redis AOF 为 `always`。同机器还有独立试验，矩阵对照采用相同的应用和数据参数。本机数值用于同负载对照。
+
+写入组每轮 5 秒，以每秒 800 个操作安排提交，90% 集中于同一篇帖。第一轮单 API，后两轮双 API。发评加删评计一个操作。关闭社交写预算，测量数据库竞争和客户端调度丢弃。
+
+| 模式 | 每轮成功操作 | 客户端调度丢弃 | 点赞 P99 | 发评加删评 P99 | MySQL 累计行锁等待 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 同行计数 | 3,002–3,157 | 843–998 | 173.9–237.5 ms | 284.4–393.9 ms | 92.586–189.090 秒 |
+| 只开分桶 | 4,000 | 0 | 3.4–4.6 ms | 6.8–9.3 ms | 0.152–0.183 秒 |
+| 只开缓存 | 3,052–3,180 | 820–948 | 200.8–211.2 ms | 296.0–329.2 ms | 93.240–188.457 秒 |
+| 分桶与缓存 | 4,000 | 0 | 3.5–4.6 ms | 7.1–9.7 ms | 0.144–0.184 秒 |
+
+每秒 800 个读操作时，各组每轮均成功 4,000 次。旧路径区间内 MySQL `Com_select` 增量为 5,160–5,164，分桶加缓存为 3,724–3,730，其中包含个人点赞和依赖监测等查询。详情 P99 从 2.224–2.360 ms 变为 2.458–2.811 ms，少了约 28% 的 SELECT，也增加了本机请求中的 Redis 检查开销。每秒 400 个混合操作时，各组每轮成功 2,000 次。矩阵各轮在汇总完成后计数对账通过。
+
+热评查询的 `EXPLAIN ANALYZE` 在楼层中间以 `idx_comment_page` 从游标开始读取 21 条。被删楼层的可见性检查使用 `(blog_id, parent_id, deleted_at, id)` 索引。原执行计划可能选择主键范围和子查询全表扫描。新增回复计数和分页接口覆盖了跨帖拒绝、删除后的楼中楼、同键重试、个人点赞可见性和榜单版本游标。
+
+每秒 120 次 Feed 读的独立对照中，旧查询出现超时和客户端丢弃。每作者候选方案也有高尾延迟，`EXPLAIN ANALYZE` 显示关注 2,000 人时，MySQL 仍会在每个作者下扫描约 500 条索引记录。默认改成按博客主键逆序查候选并探测关注关系，再只读取这一页详情。15 秒内完成 1,800 次操作、零丢弃；关注 10、500、2,000 人的 P99 分别为 23.384、12.636、3.796 ms。每作者候选保留为对照选项，默认关闭。主键逆序扫描在关注对象极少发帖时仍需监测扫描长度。
+
+同机百万粉丝四帖场景分别对照原同步推送与两个持久化扇出 Worker。普通作者通知从 54.406 秒变为 1.012 秒，热门作者第三篇到尾部样本从 54.359 秒变为 55.858 秒。两组 Redis `ZADD` 同为 3,000,002，Kafka lag 与持久化任务最终均归零。任务拆批主要改善排队公平性。对配置为读时拉取的大 V，可以省掉对应 Redis 写入。
+
+故障演练中，Worker 和 Kafka 停止期间发布文章，事件成功留在 MySQL Outbox。重启 Kafka 和 Worker 后注入 Redis 写暂停，期间可见批次超时并重试，随后任务完成、Outbox 清零，头尾通知样本可读。
