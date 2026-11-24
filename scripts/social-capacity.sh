@@ -27,6 +27,9 @@ run_social_capacity() {
     printf 'Redis ZADD delta: %s\n' "$((after-before))" | tee "$work/social-redis.txt"
     "$KAFKA_BIN_DIR/kafka-consumer-groups.sh" --bootstrap-server "$KAFKA_BROKERS" \
         --describe --group hmdp-social-notifications-v1 | tee "$work/social-lag-final.log"
+    awk '$2 == "hmdp.social.blog-published.v1" && $5 ~ /^[0-9]+$/ && $5 > 0 {
+        seen++; if ($6 != "0") failed=1
+    } END {exit !(seen && !failed)}' "$work/social-lag-final.log"
     local outbox
     outbox=$("${mysql[@]}" -N "$MYSQL_DATABASE" -e 'SELECT COUNT(*) FROM social_blog_outbox')
     [[ "$outbox" == 0 ]]
