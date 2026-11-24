@@ -27,6 +27,7 @@ run_social_hot() {
     if [[ "${SOCIAL_HOT_FAULTS:-0}" == 1 ]]; then
         social_hot_failures
         social_hot_legacy_base
+        social_hot_cache_failure
     fi
     if [[ "$workload" == smoke ]]; then return; fi
     if ((order_rate > 0)); then
@@ -40,6 +41,14 @@ run_social_hot() {
     social_hot_snapshot before
     python3 scripts/social_hot.py load "$rate" "$duration" "$workload" "$((stock+1))" "${targets[@]}" | tee "$work/social-hot.json"
     if ((order_rate > 0)); then
+        python3 - "$work/social-hot.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as report:
+    data = json.load(report)
+assert data['dropped'] == 0, data
+for result in data['requestGroups'].values():
+    assert result['success'] == sum(result['statuses'].values()), data
+PY
         wait "$benchmark_pid"
         benchmark_pid=
         wait_confirmed "$stock"
@@ -139,6 +148,13 @@ social_hot_failures() {
     start_kafka "$work/kafka.properties"
     "${redis[@]}" CLIENT PAUSE 9000 WRITE >/dev/null
     start_worker
+    for attempt in {1..100}; do
+        if [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM social_fanout_tasks WHERE blog_id=$blog AND lease_token IS NOT NULL") == 1 ]]; then break; fi
+        sleep .05
+    done
+    [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM social_fanout_tasks WHERE blog_id=$blog AND lease_token IS NOT NULL") == 1 ]]
+    kill -KILL "$worker_pid"; wait "$worker_pid" 2>/dev/null || true; worker_pid=
+    start_worker
     for attempt in {1..150}; do
         if [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM social_fanout_tasks WHERE blog_id=$blog AND due_at IS NULL") == 1 ]]; then break; fi
         sleep .2
@@ -148,7 +164,14 @@ social_hot_failures() {
     for id in 2 2048 4096; do
         [[ -n $("${redis[@]}" ZSCORE "social:notifications:$id" "$blog") ]]
     done
-    printf 'Worker stopped during publish, outbox persisted, Kafka restart, Redis write pause, task completion and notification samples passed\n' | tee "$work/social-faults.log"
+    printf 'Worker and Kafka stopped during publish, worker killed after claiming a fanout task, recovered with no missing samples\n' | tee "$work/social-faults.log"
+}
+
+social_hot_cache_failure() {
+    "${redis[@]}" DEL 'social:blog:{1}:detail' >/dev/null
+    "${redis[@]}" CLIENT PAUSE 1500 ALL >/dev/null
+    curl -fsS --max-time 3 "http://$HTTP_ADDR/blog/1" | python3 -c 'import json,sys; assert json.load(sys.stdin)["data"]["id"] == 1'
+    printf 'Anonymous detail served from MySQL with Redis unavailable\n' | tee -a "$work/social-faults.log"
 }
 
 social_hot_snapshot() {
