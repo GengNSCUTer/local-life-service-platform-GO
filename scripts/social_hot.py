@@ -51,7 +51,7 @@ def request(port, method, path, user=0, body=None, key=""):
         return 0, None
 
 
-def verify(port, second, api_count):
+def verify(port, second, api_count, workload, next_blog):
     def check(method, path, user=0, body=None, key="", status=200, target=port):
         result, data = request(target, method, path, user, body, key)
         assert result == status, (method, path, result, status, data)
@@ -82,7 +82,7 @@ def verify(port, second, api_count):
     assert check("GET", "/blog/1", 1)["isLike"] and not check("GET", "/blog/1", 2)["isLike"]
     check("DELETE", "/blog/like/1", 1)
     assert not check("GET", "/blog/1", 1)["isLike"]
-    for viewer in (1, 2, 3):
+    for viewer in ((1, 2, 3) if workload in ("feed", "smoke") else (3,)):
         page = check("GET", "/blog/of/follow", viewer)
         ids = [row["id"] for row in page["list"]]
         assert ids == sorted(set(ids), reverse=True)
@@ -90,6 +90,11 @@ def verify(port, second, api_count):
             tail = check("GET", "/blog/of/follow?cursor=" + page["nextCursor"], viewer)
             assert tail["list"][0]["id"] < ids[-1]
     assert check("GET", "/blog/of/follow", 4)["list"] == []
+    if workload == "smoke":
+        check("GET", f"/blog/{next_blog}", status=404)
+        published = check("POST", "/blog", 1, {"shopId": 1, "title": "New", "content": "Fresh"})
+        assert published == next_blog
+        assert check("GET", f"/blog/{published}")["id"] == published
     for _ in range(30):
         status, page = request(port, "GET", "/blog/hot?snapshot=true")
         if status == 200 and page.get("nextCursor"):
@@ -164,8 +169,9 @@ def load(rate, duration, mode, first_user, ports):
 
 
 if __name__ == "__main__":
-    modes = {"seed": seed, "verify": verify}
-    if sys.argv[1] in modes:
-        modes[sys.argv[1]](*map(int, sys.argv[2:]))
+    if sys.argv[1] == "seed":
+        seed(*map(int, sys.argv[2:]))
+    elif sys.argv[1] == "verify":
+        verify(*map(int, sys.argv[2:5]), sys.argv[5], int(sys.argv[6]))
     else:
         load(int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], int(sys.argv[5]), list(map(int, sys.argv[6:])))

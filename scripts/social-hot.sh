@@ -16,7 +16,7 @@ run_social_hot() {
     fi
     python3 scripts/social_hot.py seed "${SOCIAL_HOT_BLOGS:-1000000}" "${SOCIAL_HOT_COMMENTS:-100000}" | "${mysql[@]}" "$MYSQL_DATABASE"
     seed_sessions "$((stock+4096))" > "$work/sessions.log"
-    python3 scripts/social_hot.py verify "$port" "$((port+8))" "$api_count" | tee "$work/social-smoke.log"
+    python3 scripts/social_hot.py verify "$port" "$((port+8))" "$api_count" "$workload" "$(( ${SOCIAL_HOT_BLOGS:-1000000} + 1 ))" | tee "$work/social-smoke.log"
     if [[ "$workload" == matrix || "$workload" == sweep ]]; then
         social_hot_matrix
         return

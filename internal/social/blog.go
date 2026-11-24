@@ -116,6 +116,9 @@ func (s *Service) publish(ctx context.Context, author uint64, input blogInput) (
 		}
 		return tx.Exec("INSERT INTO social_blog_outbox (blog_id, author_id) VALUES (?, ?)", item.ID, author).Error
 	})
+	if err == nil && s.detailCache {
+		s.clearDetailCache(ctx, item.ID)
+	}
 	return item.ID, err
 }
 

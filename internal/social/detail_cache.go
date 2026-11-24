@@ -17,6 +17,19 @@ if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 if ARGV[2] ~= '' then redis.call('SET', KEYS[2], ARGV[2], 'PX', ARGV[3]) end
 return redis.call('DEL', KEYS[1])`)
 
+func detailCacheKeys(id uint64) (key, lease string) {
+	prefix := "social:blog:{" + strconv.FormatUint(id, 10) + "}:"
+	return prefix + "detail", prefix + "fill"
+}
+
+func (s *Service) clearDetailCache(ctx context.Context, id uint64) {
+	operation, cancel := context.WithTimeout(context.WithoutCancel(ctx), 75*time.Millisecond)
+	defer cancel()
+	key, lease := detailCacheKeys(id)
+	// Revoking the lease also fences a reader that began before the publish committed.
+	_ = s.cache.Del(operation, key, lease).Err()
+}
+
 func (s *Service) loadDetail(ctx context.Context, id, viewer uint64) (blogView, error) {
 	var item blogView
 	if !s.detailCache {
@@ -35,8 +48,7 @@ func (s *Service) loadDetail(ctx context.Context, id, viewer uint64) (blogView, 
 
 func (s *Service) publicDetail(ctx context.Context, id uint64) (blogView, error) {
 	var item blogView
-	prefix := "social:blog:{" + strconv.FormatUint(id, 10) + "}:"
-	key, lease := prefix+"detail", prefix+"fill"
+	key, lease := detailCacheKeys(id)
 	token := rand.Text()
 	for ctx.Err() == nil {
 		lookup, cancel := context.WithTimeout(ctx, 75*time.Millisecond)
