@@ -32,3 +32,5 @@ Prometheus 指标为 `hmdp_http_rate_limit_total` 和 `hmdp_shop_mysql_circuit_s
 模拟取消事务已提交、Redis 尚未回补。预览保持库存不变，执行加回一份，重复执行返回 `already_synced`。移除另一笔取消订单的 Redis 买家记录后，执行返回 `manual_review` 并保留原库存。审计表记录了三个操作结果。
 
 另向 Kafka 投递一条没有追踪字段和 Header 的 v1 订单事件，升级后的 Worker 正常将订单写为 `confirmed`。
+
+保护开关的开销用同机两组 API 对照。每路径和每组记录 1,000 次请求，预热 100 次，两组共用 MySQL 和 Redis，按约每组 100 请求/秒交替请求。Redis AOF 为 `always`。抢券售罄路径开启单用户限流后 P99 从 1.459 ms 到 3.086 ms。不存在的店铺每次用不同 ID 触发 MySQL 回源，开启熔断后 P99 从 3.685 ms 到 3.718 ms。该对照用于观察正常依赖下的请求开销。
