@@ -33,6 +33,14 @@ run_social_capacity() {
     local outbox
     outbox=$("${mysql[@]}" -N "$MYSQL_DATABASE" -e 'SELECT COUNT(*) FROM social_blog_outbox')
     [[ "$outbox" == 0 ]]
+    local pending
+    for attempt in {1..60}; do
+        pending=$("${mysql[@]}" -N "$MYSQL_DATABASE" -e 'SELECT COUNT(*) FROM social_fanout_tasks WHERE due_at IS NOT NULL')
+        if [[ "$pending" == 0 ]]; then break; fi
+        sleep .25
+    done
+    printf 'Pending durable fanout tasks: %s\n' "$pending" | tee "$work/social-task-pending.txt"
+    [[ "$pending" == 0 ]]
 }
 
 social_zadds() {

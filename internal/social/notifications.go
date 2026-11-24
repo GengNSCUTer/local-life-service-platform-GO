@@ -27,6 +27,14 @@ type publishedBlog struct {
 }
 
 func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafka.Client, transport *kafka.Transport, started func()) error {
+	local, stop := context.WithCancel(ctx)
+	var workers sync.WaitGroup
+	defer func() { stop(); workers.Wait() }()
+	workers.Go(func() { s.counterWorker(local) })
+	workers.Go(func() { s.rankWorker(local) })
+	for range s.fanoutWorkers {
+		workers.Go(func() { s.fanoutWorker(local) })
+	}
 	for ctx.Err() == nil {
 		operation, cancel := context.WithTimeout(ctx, 3*time.Second)
 		result, err := client.CreateTopics(operation, &kafka.CreateTopicsRequest{Topics: []kafka.TopicConfig{
@@ -51,14 +59,8 @@ func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafk
 		RequiredAcks: kafka.RequireAll, Balancer: &kafka.Hash{}, BatchTimeout: 10 * time.Millisecond,
 		ReadTimeout: 3 * time.Second, WriteTimeout: 3 * time.Second, MaxAttempts: 3}
 	reader := kafka.NewReader(kafka.ReaderConfig{Brokers: brokers, Topic: blogTopic, GroupID: "hmdp-social-notifications-v1", StartOffset: kafka.FirstOffset, MaxWait: 500 * time.Millisecond})
-	var workers sync.WaitGroup
 	workers.Go(func() { s.relay(ctx, writer) })
 	workers.Go(func() { s.consume(ctx, reader) })
-	workers.Go(func() { s.counterWorker(ctx) })
-	workers.Go(func() { s.rankWorker(ctx) })
-	for range s.fanoutWorkers {
-		workers.Go(func() { s.fanoutWorker(ctx) })
-	}
 	started()
 	workers.Wait()
 	return errors.Join(reader.Close(), writer.Close())

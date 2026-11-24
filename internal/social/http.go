@@ -176,12 +176,18 @@ func (s *Service) feed(c *gin.Context) {
 			s.respond(c, feedPage{List: []blogView{}}, nil)
 			return
 		}
-		query = query.Where("b.id IN ?", ids)
+		query = query.Joins("JOIN social_follows f ON f.follow_user_id = b.user_id AND f.user_id = ?", viewer).Where("b.id IN ?", ids)
 	} else {
-		query = query.Joins("JOIN social_follows f ON f.follow_user_id = b.user_id AND f.user_id = ?", viewer)
+		// Materialize a small page of IDs before reading blog bodies and viewer details.
+		// STRAIGHT_JOIN walks the blog primary index in order and probes the follow index.
+		page := s.db.WithContext(ctx).Table("tb_blog AS candidate FORCE INDEX (PRIMARY)").
+			Select("STRAIGHT_JOIN candidate.id").
+			Joins("JOIN social_follows candidate_follow ON candidate_follow.follow_user_id = candidate.user_id AND candidate_follow.user_id = ?", viewer).
+			Order("candidate.id DESC").Limit(pageSize + 1)
 		if before != 0 {
-			query = query.Where("b.id < ?", before)
+			page = page.Where("candidate.id < ?", before)
 		}
+		query = query.Joins("JOIN (?) feed_page ON feed_page.id = b.id", page)
 	}
 	page := feedPage{List: make([]blogView, 0)}
 	err := query.Order("b.id DESC").Limit(pageSize + 1).Find(&page.List).Error

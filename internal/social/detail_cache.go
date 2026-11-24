@@ -92,10 +92,16 @@ func (s *Service) publicDetail(ctx context.Context, id uint64) (blogView, error)
 }
 
 func (s *Service) queryPublicDetail(ctx context.Context, id uint64) (blogView, error) {
-	s.cacheMetric("mysql")
 	var item blogView
 	operation, cancel := context.WithTimeout(ctx, 700*time.Millisecond)
 	defer cancel()
+	select {
+	case s.detailReads <- struct{}{}:
+		defer func() { <-s.detailReads }()
+	case <-operation.Done():
+		return item, operation.Err()
+	}
+	s.cacheMetric("mysql")
 	err := s.blogs(operation, 0).Take(&item, "b.id = ?", id).Error
 	if err == nil {
 		item.IsLike = false

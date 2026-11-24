@@ -27,12 +27,13 @@ type Service struct {
 	detailCache    bool
 	boundedFeed    bool
 	writeSlots     chan struct{}
+	detailReads    chan struct{}
 	fanoutWorkers  int
 	metrics        *metrics
 }
 
 func New(db *gorm.DB, cache *redis.Client, logger *slog.Logger) *Service {
-	return &Service{db: db, cache: cache, logger: logger}
+	return &Service{db: db, cache: cache, logger: logger, detailReads: make(chan struct{}, 4)}
 }
 
 func (s *Service) ConfigureCapacity(buckets, detailCache, boundedFeed bool, writeLimit, fanoutWorkers int) {

@@ -12,6 +12,7 @@ import time
 def seed(blogs, comments):
     from catalog_seed import insert
 
+    print("SET SESSION sql_log_bin = 0;")
     print("START TRANSACTION;")
     print("INSERT INTO tb_shop_type (id,name) VALUES (1,'Food');")
     print("INSERT INTO tb_shop (id,name,type_id,images,address,x,y) VALUES (1,'Fixture',1,'','address',0,0);")
@@ -90,15 +91,14 @@ def verify(port, second, api_count):
             assert tail["list"][0]["id"] < ids[-1]
     for _ in range(30):
         status, page = request(port, "GET", "/blog/hot?snapshot=true")
-        if status == 200:
+        if status == 200 and page.get("nextCursor"):
             break
         time.sleep(.5)
     else:
         raise RuntimeError("rank snapshot never became visible")
-    if page.get("nextCursor"):
-        other = check("GET", "/blog/hot?snapshot=true&cursor=" + page["nextCursor"])
-        assert not {row["id"] for row in page["list"]} & {row["id"] for row in other["list"]}
-        check("GET", "/blog/hot?snapshot=true&cursor=1:10", status=410)
+    other = check("GET", "/blog/hot?snapshot=true&cursor=" + page["nextCursor"])
+    assert not {row["id"] for row in page["list"]} & {row["id"] for row in other["list"]}
+    check("GET", "/blog/hot?snapshot=true&cursor=1:10", status=410)
     print("deep replies, idempotency, deletion, personal likes, feed cursors and rank snapshots passed")
 
 
@@ -149,6 +149,8 @@ def load(rate, duration, mode, first_user, ports):
                 args = ("detail", "GET", f"/blog/{blog}", 0 if i % 2 else user, None)
             pending.add(executor.submit(perform, ports[i % len(ports)], *args, scheduled))
             attempted += 1
+            if i and i % (rate * 60) == 0:
+                print(f"elapsed={i // rate}s dispatched={attempted} dropped={dropped}", file=sys.stderr, flush=True)
         collect(pending)
     report = {}
     for action, groups in results.items():

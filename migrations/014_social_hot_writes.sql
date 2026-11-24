@@ -8,6 +8,16 @@ PREPARE comment_columns_stmt FROM @comment_columns;
 EXECUTE comment_columns_stmt;
 DEALLOCATE PREPARE comment_columns_stmt;
 
+SET @visible_reply_index = IF(
+    EXISTS (SELECT 1 FROM information_schema.statistics WHERE table_schema = DATABASE()
+            AND table_name = 'social_blog_comments' AND index_name = 'idx_comment_visible_reply'),
+    'DO 0',
+    'CREATE INDEX idx_comment_visible_reply ON social_blog_comments (blog_id, parent_id, deleted_at, id)'
+);
+PREPARE visible_reply_index_stmt FROM @visible_reply_index;
+EXECUTE visible_reply_index_stmt;
+DEALLOCATE PREPARE visible_reply_index_stmt;
+
 CREATE TABLE IF NOT EXISTS social_blog_counter_buckets (
     blog_id BIGINT UNSIGNED NOT NULL,
     bucket TINYINT UNSIGNED NOT NULL,

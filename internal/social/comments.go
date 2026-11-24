@@ -131,7 +131,7 @@ func (s *Service) listComments(c *gin.Context) {
 		s.commentError(c, err)
 		return
 	}
-	query := s.db.WithContext(ctx).Table(commentTable).Where("blog_id = ? AND id > ?", blogID, after)
+	query := s.db.WithContext(ctx).Table(commentTable+" FORCE INDEX (idx_comment_page)").Where("blog_id = ? AND id > ?", blogID, after)
 	if parent := c.Query("parentId"); parent != "" {
 		id, ok := positiveID(c, parent)
 		if !ok {
@@ -139,7 +139,7 @@ func (s *Service) listComments(c *gin.Context) {
 		}
 		query = query.Where("parent_id = ? AND deleted_at IS NULL", id)
 	} else {
-		query = query.Where("parent_id IS NULL AND (deleted_at IS NULL OR EXISTS (SELECT 1 FROM social_blog_comments r WHERE r.parent_id = social_blog_comments.id AND r.blog_id = social_blog_comments.blog_id AND r.deleted_at IS NULL))")
+		query = query.Where("parent_id IS NULL AND (deleted_at IS NULL OR (SELECT r.id FROM social_blog_comments r FORCE INDEX (idx_comment_visible_reply) WHERE r.parent_id = social_blog_comments.id AND r.blog_id = social_blog_comments.blog_id AND r.deleted_at IS NULL LIMIT 1) IS NOT NULL)")
 	}
 	items := make([]comment, 0, 21)
 	if err := query.Order("id").Limit(21).Find(&items).Error; err != nil {

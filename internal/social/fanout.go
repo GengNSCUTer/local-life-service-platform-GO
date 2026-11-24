@@ -3,6 +3,7 @@ package social
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"errors"
 	"time"
 
@@ -33,7 +34,7 @@ func (s *Service) fanoutStep(ctx context.Context) error {
 			return err
 		}
 		return tx.Exec(`UPDATE social_fanout_tasks SET lease_token = ?, due_at = TIMESTAMPADD(SECOND, 10, CURRENT_TIMESTAMP(3)) WHERE blog_id = ?`, token, task.BlogID).Error
-	})
+	}, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
 	}

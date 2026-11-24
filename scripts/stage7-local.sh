@@ -36,8 +36,9 @@ for number in ports:
         except OSError as exc:
             sys.exit(f'Local port {number} is unavailable. Set STAGE7_BASE_PORT to a free range. {exc}')
 PY
-mkdir -p runtime
-work=$(mktemp -d "$PWD/runtime/stage7-$mode.XXXXXX")
+runtime_dir=${STAGE7_RUNTIME_DIR:-$PWD/runtime}
+mkdir -p "$runtime_dir"
+work=$(mktemp -d "$runtime_dir/stage7-$mode.XXXXXX")
 export TMPDIR="$work" GOTMPDIR="$work"
 export LOG_DIR="$work/kafka-logs"
 export JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:-} -XX:ActiveProcessorCount=4 -XX:-UsePerfData -Djava.io.tmpdir=$work"
@@ -132,6 +133,7 @@ run_mysql() {
     local -a options=()
     if [[ "$mode" == orders || "$mode" == worker-scale || "$mode" == social-hot ]]; then
         options+=(--innodb-buffer-pool-size=1G)
+        if [[ "$mode" == social-hot ]]; then options+=(--innodb-redo-log-capacity=512M); fi
         if [[ "$mode" == social-hot || ( "$mode" == orders && ${ORDER_TEST_DURABLE:-0} == 1 ) ]]; then
             options+=(--innodb-flush-log-at-trx-commit=1 --sync-binlog=1)
         else

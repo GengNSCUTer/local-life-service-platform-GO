@@ -10,6 +10,8 @@ from itertools import chain
 def seed(followers):
     from catalog_seed import insert
 
+    print("SET SESSION sql_log_bin = 0;")
+    print("START TRANSACTION;")
     print("INSERT INTO tb_shop_type (id, name) VALUES (1, 'Food');")
     print("INSERT INTO tb_shop (id, name, type_id, images, address, x, y) "
           "VALUES (1, 'Demo shop', 1, '', '', 0, 0);")
@@ -18,6 +20,7 @@ def seed(followers):
     insert("social_follows", "user_id, follow_user_id",
            (f"({i}, 2)" for i in range(101, 101 + followers)))
     print("INSERT INTO social_follows (user_id, follow_user_id) VALUES (1, 7), (101, 7);")
+    print("COMMIT;")
     print("ANALYZE TABLE social_follows, tb_blog;")
 
 
