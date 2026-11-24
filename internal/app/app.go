@@ -67,6 +67,9 @@ func runAPI(ctx context.Context, cfg config.Config, logger *slog.Logger, startWo
 	shop.New(deps.mysql, deps.redis, logger, cfg.ShopAdminUserID).Register(router, requireLogin, users.VisitorLogin)
 	voucher.New(deps.mysql, logger, cfg.VoucherAdminUserID, service).Register(router, requireLogin)
 	community := social.New(deps.mysql, deps.redis, logger)
+	if err := community.ConfigurePullAuthors(cfg.SocialPullAuthorIDs); err != nil {
+		return err
+	}
 	community.Register(router, requireLogin, users.OptionalLogin())
 	if startWorkers {
 		workerCtx, stop := context.WithCancel(context.WithoutCancel(ctx))

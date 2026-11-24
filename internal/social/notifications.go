@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -15,6 +16,9 @@ import (
 )
 
 const blogTopic = "hmdp.social.blog-published.v1"
+const notificationPull = 1
+const notificationLimit = 100
+const notificationRetention = 30 * 24 * time.Hour
 
 type publishedBlog struct {
 	BlogID    uint64    `json:"blogId"`
@@ -135,7 +139,7 @@ return 1
 
 func (s *Service) notifyFollowers(ctx context.Context, event publishedBlog) error {
 	const batchSize = 512
-	const ttlSeconds = 30 * 24 * 60 * 60
+	const ttlSeconds = int(notificationRetention / time.Second)
 	blogID := strconv.FormatUint(event.BlogID, 10)
 	publishedAt := event.CreatedAt.UnixMilli()
 	var last uint64
@@ -164,7 +168,7 @@ func (s *Service) notifyFollowers(ctx context.Context, event publishedBlog) erro
 func (s *Service) notifications(c *gin.Context) {
 	ctx, cancel, viewer := requestContext(c)
 	defer cancel()
-	members, err := s.cache.ZRevRange(ctx, notificationKey(viewer), 0, 99).Result()
+	members, err := s.cache.ZRevRange(ctx, notificationKey(viewer), 0, notificationLimit-1).Result()
 	if err != nil {
 		s.respond(c, nil, err)
 		return
@@ -175,20 +179,22 @@ func (s *Service) notifications(c *gin.Context) {
 			ids = append(ids, id)
 		}
 	}
+	var pulled []uint64
+	err = s.db.WithContext(ctx).Table("social_follows AS f").
+		Joins("JOIN tb_blog AS b ON b.user_id = f.follow_user_id AND b.notification_mode = ?", notificationPull).
+		Where("f.user_id = ? AND b.create_time >= TIMESTAMPADD(SECOND, ?, CURRENT_TIMESTAMP)", viewer, -int(notificationRetention/time.Second)).
+		Order("b.id DESC").Limit(notificationLimit).Pluck("b.id", &pulled).Error
+	if err != nil {
+		s.respond(c, nil, err)
+		return
+	}
+	ids = append(ids, pulled...)
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
 	items := make([]blogView, 0)
-	if len(ids) > 0 {
-		var rows []blogView
+	if len(ids) != 0 {
 		err = s.blogs(ctx, viewer).Joins("JOIN social_follows f ON f.follow_user_id = b.user_id AND f.user_id = ?", viewer).
-			Where("b.id IN ?", ids).Find(&rows).Error
-		byID := make(map[uint64]blogView, len(rows))
-		for _, row := range rows {
-			byID[row.ID] = row
-		}
-		for _, id := range ids {
-			if row, ok := byID[id]; ok {
-				items = append(items, row)
-			}
-		}
+			Where("b.id IN ?", ids).Order("b.id DESC").Limit(notificationLimit).Find(&items).Error
 	}
 	s.respond(c, items, err)
 }

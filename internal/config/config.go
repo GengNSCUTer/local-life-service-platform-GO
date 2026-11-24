@@ -28,6 +28,7 @@ type Config struct {
 	MediaSecretKey         string
 	MediaBucket            string
 	MediaPublicURL         string
+	SocialPullAuthorIDs    string
 	MySQLAddr              string
 	MySQLUser              string
 	MySQLPassword          string
@@ -95,6 +96,7 @@ func Load() Config {
 		MediaSecretKey:         env("MEDIA_S3_SECRET_KEY", ""),
 		MediaBucket:            env("MEDIA_S3_BUCKET", ""),
 		MediaPublicURL:         env("MEDIA_PUBLIC_URL", ""),
+		SocialPullAuthorIDs:    env("SOCIAL_PULL_AUTHOR_IDS", ""),
 		MySQLAddr:              env("MYSQL_ADDR", localAddr("MYSQL_PORT", "23306")),
 		MySQLUser:              env("MYSQL_USER", "hmdp"),
 		MySQLPassword:          env("MYSQL_PASSWORD", "hmdp_dev_mysql"),

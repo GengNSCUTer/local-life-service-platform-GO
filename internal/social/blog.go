@@ -3,7 +3,10 @@ package social
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -17,13 +20,31 @@ var errInvalidShop = errors.New("shop not found")
 var errInvalidFollow = errors.New("follow target must be another existing user")
 
 type Service struct {
-	db     *gorm.DB
-	cache  *redis.Client
-	logger *slog.Logger
+	db          *gorm.DB
+	cache       *redis.Client
+	logger      *slog.Logger
+	pullAuthors map[uint64]struct{}
 }
 
 func New(db *gorm.DB, cache *redis.Client, logger *slog.Logger) *Service {
 	return &Service{db: db, cache: cache, logger: logger}
+}
+
+// ConfigurePullAuthors runs before routes are registered.
+func (s *Service) ConfigurePullAuthors(list string) error {
+	if strings.TrimSpace(list) == "" {
+		return nil
+	}
+	authors := make(map[uint64]struct{})
+	for token := range strings.SplitSeq(list, ",") {
+		id, err := strconv.ParseUint(strings.TrimSpace(token), 10, 64)
+		if err != nil || id == 0 {
+			return fmt.Errorf("SOCIAL_PULL_AUTHOR_IDS must contain positive author IDs")
+		}
+		authors[id] = struct{}{}
+	}
+	s.pullAuthors = authors
+	return nil
 }
 
 type blogInput struct {
@@ -34,15 +55,16 @@ type blogInput struct {
 }
 
 type Blog struct {
-	ID        uint64    `json:"id" gorm:"primaryKey"`
-	ShopID    uint64    `json:"shopId"`
-	UserID    uint64    `json:"userId"`
-	Title     string    `json:"title"`
-	Images    string    `json:"images"`
-	Content   string    `json:"content"`
-	Liked     uint32    `json:"liked"`
-	Comments  uint32    `json:"comments"`
-	CreatedAt time.Time `json:"createTime" gorm:"column:create_time;->"`
+	ID               uint64    `json:"id" gorm:"primaryKey"`
+	ShopID           uint64    `json:"shopId"`
+	UserID           uint64    `json:"userId"`
+	Title            string    `json:"title"`
+	Images           string    `json:"images"`
+	Content          string    `json:"content"`
+	Liked            uint32    `json:"liked"`
+	Comments         uint32    `json:"comments"`
+	CreatedAt        time.Time `json:"createTime" gorm:"column:create_time;->"`
+	NotificationMode uint8     `json:"-"`
 }
 
 type blogView struct {
@@ -61,6 +83,9 @@ type profile struct {
 
 func (s *Service) publish(ctx context.Context, author uint64, input blogInput) (uint64, error) {
 	item := Blog{ShopID: input.ShopID, UserID: author, Title: input.Title, Images: input.Images, Content: input.Content}
+	if _, ok := s.pullAuthors[author]; ok {
+		item.NotificationMode = notificationPull
+	}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var shop struct{ ID uint64 }
 		if err := tx.Table("tb_shop").Select("id").Take(&shop, "id = ?", input.ShopID).Error; err != nil {
@@ -71,6 +96,9 @@ func (s *Service) publish(ctx context.Context, author uint64, input blogInput) (
 		}
 		if err := tx.Table("tb_blog").Create(&item).Error; err != nil {
 			return err
+		}
+		if item.NotificationMode == notificationPull {
+			return nil
 		}
 		return tx.Exec("INSERT INTO social_blog_outbox (blog_id, author_id) VALUES (?, ?)", item.ID, author).Error
 	})

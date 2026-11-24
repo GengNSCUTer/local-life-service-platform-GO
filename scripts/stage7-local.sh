@@ -6,7 +6,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 : "${KAFKA_BIN_DIR:?set KAFKA_BIN_DIR to the Kafka bin directory}"
 redis_bin=${REDIS_BIN_DIR:-/usr/bin}
 mode=${1:-restore}
-case "$mode" in restore|soak|capacity|catalog|orders|worker-scale) ;; *) echo 'usage: scripts/stage7-local.sh [restore|soak|capacity|catalog|orders|worker-scale]' >&2; exit 2 ;; esac
+case "$mode" in restore|soak|capacity|catalog|social|orders|worker-scale) ;; *) echo 'usage: scripts/stage7-local.sh [restore|soak|capacity|catalog|social|orders|worker-scale]' >&2; exit 2 ;; esac
 port=${STAGE7_BASE_PORT:-29840}
 export SECKILL_REDIS_SHARDED=false SECKILL_REDIS_CLUSTER_ADDRS= SECKILL_STOCK_BUCKETS=1
 test_cluster=0
@@ -276,6 +276,11 @@ start_worker
 if [[ "$mode" == catalog ]]; then
     source scripts/catalog-scenarios.sh
     run_catalog
+    exit 0
+fi
+if [[ "$mode" == social ]]; then
+    source scripts/social-capacity.sh
+    run_social_capacity
     exit 0
 fi
 if [[ "$mode" == capacity ]]; then
