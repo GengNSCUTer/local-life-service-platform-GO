@@ -34,6 +34,9 @@ func TestReservationRecovery(t *testing.T) {
 	cache := redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDIS_PASSWORD")})
 	defer cache.Close()
 	service := New(db, cache, slog.Default(), time.Minute, 0, 0, Layout{})
+	if _, err := service.pendingResolutions(t.Context(), 1); err != nil {
+		t.Fatalf("scan pending compensation with trace-enabled order events: %v", err)
+	}
 
 	for _, route := range []string{"confirmed before timeout", "recover backup", "audit missing payload", "inventory mismatch never increases Redis stock"} {
 		t.Run(route, func(t *testing.T) {
