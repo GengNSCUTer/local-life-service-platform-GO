@@ -3,6 +3,7 @@ import argparse
 import http.client
 import json
 import math
+import os
 import time
 from itertools import chain
 
@@ -16,9 +17,12 @@ def seed(followers):
     print("INSERT INTO tb_shop (id, name, type_id, images, address, x, y) "
           "VALUES (1, 'Demo shop', 1, '', '', 0, 0);")
     insert("tb_user", "id, phone, nick_name",
-           (f"({i}, '199{i:08d}', 'Follower {i}')" for i in chain((1, 2, 7), range(101, 101 + followers))))
+           (f"({i}, '199{i:08d}', 'Follower {i}')" for i in chain((1, 2, 3, 7), range(101, 101 + followers))))
     insert("social_follows", "user_id, follow_user_id",
            (f"({i}, 2)" for i in range(101, 101 + followers)))
+    if os.getenv("SOCIAL_TEST_TWO_POPULAR") == "1":
+        insert("social_follows", "user_id, follow_user_id",
+               (f"({i}, 3)" for i in range(101, 101 + followers)))
     print("INSERT INTO social_follows (user_id, follow_user_id) VALUES (1, 7), (101, 7);")
     print("COMMIT;")
     print("ANALYZE TABLE social_follows, tb_blog;")
@@ -47,6 +51,8 @@ def measure(port, followers, seconds):
 
     try:
         popular = dict(publish(2, i) for i in range(3))
+        if os.getenv("SOCIAL_TEST_TWO_POPULAR") == "1":
+            popular.update(publish(3, i + 5) for i in range(3))
         ordinary, ordinary_at = publish(7, 4)
         viewers = {101: {}, followers + 100: {}, 1: {}}
         started = time.monotonic()
@@ -76,7 +82,7 @@ def measure(port, followers, seconds):
                           "ordinaryPost": ordinary, "readRequests": visits,
                           "first200ReadsP99ms": round(ordered[math.ceil(len(ordered) * .99) - 1], 3)}), flush=True)
         request("PUT", "/follow/2/false", 101)
-        if any(row["id"] in popular for row in request("GET", "/blog/notifications", 101)):
+        if any(row["userId"] == 2 for row in request("GET", "/blog/notifications", 101)):
             raise RuntimeError("unfollowed author's post is visible")
     finally:
         conn.close()

@@ -142,7 +142,8 @@ def load(rate, duration, mode, first_user, ports):
                 args = ("comment", "POST", f"/blog/{blog}/comments", user, {"content": "load"})
             elif mode == "feed":
                 viewer = 1 + i % 3
-                args = (f"feed_{viewer}", "GET", "/blog/of/follow", viewer, None)
+                before = "?cursor=900000" if (i // 3) % 2 else ""
+                args = (f"feed_{viewer}", "GET", "/blog/of/follow" + before, viewer, None)
             elif rng.random() < .25:
                 args = ("comment_read", "GET", f"/blog/{blog}/comments", 0, None)
             else:

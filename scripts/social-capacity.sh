@@ -7,7 +7,7 @@ run_social_capacity() {
     local rows
     rows=$("${mysql[@]}" -N "$MYSQL_DATABASE" -e 'SELECT COUNT(*) FROM social_follows WHERE follow_user_id = 2')
     [[ "$rows" == "$followers" ]]
-    for id in 1 2 7 101 "$((followers+100))"; do
+    for id in 1 2 3 7 101 "$((followers+100))"; do
         "${redis[@]}" HSET "login:token:social-$id" id "$id" >/dev/null
     done
     local before after

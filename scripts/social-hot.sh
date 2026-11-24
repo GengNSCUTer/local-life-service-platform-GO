@@ -26,6 +26,7 @@ run_social_hot() {
     fi
     if [[ "${SOCIAL_HOT_FAULTS:-0}" == 1 ]]; then
         social_hot_failures
+        social_hot_legacy_base
     fi
     if [[ "$workload" == smoke ]]; then return; fi
     if ((order_rate > 0)); then
@@ -49,6 +50,24 @@ run_social_hot() {
     social_hot_assert_counters
     printf 'counter mismatches: 0\n' | tee "$work/social-counter-audit.txt"
     social_hot_snapshot after
+}
+
+social_hot_legacy_base() {
+    "${mysql[@]}" "$MYSQL_DATABASE" -e 'UPDATE tb_blog SET liked=47 WHERE id=34;'
+    curl -fsS -X PUT -H 'Authorization: Bearer stage7-2' "http://$HTTP_ADDR/blog/like/34?liked=true" >/dev/null
+    local expected=48 verb
+    for verb in PUT DELETE; do
+        for attempt in {1..30}; do
+            if [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e 'SELECT liked FROM tb_blog WHERE id=34') == "$expected" ]]; then break; fi
+            sleep .2
+        done
+        [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e 'SELECT liked FROM tb_blog WHERE id=34') == "$expected" ]]
+        if [[ "$verb" == PUT ]]; then
+            curl -fsS -X DELETE -H 'Authorization: Bearer stage7-2' "http://$HTTP_ADDR/blog/like/34" >/dev/null
+            expected=47
+        fi
+    done
+    printf 'Legacy display count survived new like and unlike\n' | tee -a "$work/social-faults.log"
 }
 
 social_hot_feed_plans() {
