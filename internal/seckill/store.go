@@ -48,11 +48,12 @@ type orderClaim struct {
 }
 
 type orderEvent struct {
-	Version   int       `json:"schema_version"`
-	ID        string    `json:"order_id"`
-	VoucherID uint64    `json:"voucher_id"`
-	UserID    uint64    `json:"user_id"`
-	CreatedAt time.Time `json:"occurred_at"`
+	Version      int               `json:"schema_version"`
+	ID           string            `json:"order_id"`
+	VoucherID    uint64            `json:"voucher_id"`
+	UserID       uint64            `json:"user_id"`
+	CreatedAt    time.Time         `json:"occurred_at"`
+	TraceHeaders map[string]string `json:"trace,omitempty"`
 }
 
 func (e orderEvent) valid(id string) bool {

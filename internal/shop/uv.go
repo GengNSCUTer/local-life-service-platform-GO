@@ -26,6 +26,9 @@ return 1`)
 )
 
 func (s *Service) recordVisit(c *gin.Context) {
+	if !user.VisitorIdentityAvailable(c.Request.Context()) {
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 25*time.Millisecond)
 	defer cancel()
 	now := time.Now().In(uvZone)

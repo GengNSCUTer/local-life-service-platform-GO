@@ -12,6 +12,7 @@ import (
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/config"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/media"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/platform/observe"
+	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/platform/traffic"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/seckill"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/shop"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/social"
@@ -30,6 +31,15 @@ func RunAPI(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 }
 
 func runAPI(ctx context.Context, cfg config.Config, logger *slog.Logger, startWorkers bool) (runErr error) {
+	stopTracing, err := observe.StartTracing(ctx, "hmdp-api", cfg.TraceEndpoint, cfg.TraceSampleRatio)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := stopTracing(); err != nil {
+			logger.Warn("stop trace exporter", "error", err)
+		}
+	}()
 	deps, err := openClients(cfg, startWorkers)
 	if err != nil {
 		return err
@@ -55,16 +65,22 @@ func runAPI(ctx context.Context, cfg config.Config, logger *slog.Logger, startWo
 	service := deps.seckillService(cfg, logger)
 	service.RegisterMetrics(registry, startWorkers)
 	router := newRouter(logger, deps.probes(), observe.HTTP(registry))
+	router.Use(observe.TraceSeckill)
 	users := user.New(deps.mysql, deps.redis, logger, cfg.AuthDevLogCodes)
-	users.Register(router)
+	limits := traffic.NewLimiter(deps.redis, registry)
+	users.Register(router, limits.CodeByIP(cfg.AuthCodeIPLimit))
 	requireLogin := users.RequireLogin()
 	images, err := media.New(cfg.MediaEndpoint, cfg.MediaAccessKey, cfg.MediaSecretKey, cfg.MediaBucket, cfg.MediaPublicURL)
 	if err != nil {
 		return err
 	}
 	images.Register(router, requireLogin, logger)
-	service.Register(router, requireLogin)
-	shop.New(deps.mysql, deps.redis, logger, cfg.ShopAdminUserID).Register(router, requireLogin, users.VisitorLogin)
+	service.Register(router, requireLogin, limits.SeckillByUser(cfg.SeckillUserLimit))
+	shops := shop.New(deps.mysql, deps.redis, logger, cfg.ShopAdminUserID)
+	if cfg.ShopBreakerEnabled {
+		shops.EnableBreaker(registry)
+	}
+	shops.Register(router, requireLogin, users.VisitorLogin)
 	voucher.New(deps.mysql, logger, cfg.VoucherAdminUserID, service).Register(router, requireLogin)
 	community := social.New(deps.mysql, deps.redis, logger)
 	if err := community.ConfigurePullAuthors(cfg.SocialPullAuthorIDs); err != nil {
@@ -135,4 +151,13 @@ func AuditSeckill(ctx context.Context, cfg config.Config, logger *slog.Logger, v
 	}
 	defer func() { auditErr = errors.Join(auditErr, deps.close()) }()
 	return deps.seckillService(cfg, logger).AuditInventory(ctx, voucherID)
+}
+
+func RepairSeckill(ctx context.Context, cfg config.Config, logger *slog.Logger, id string, apply bool) (_ seckill.RepairResult, repairErr error) {
+	deps, err := openClients(cfg, false)
+	if err != nil {
+		return seckill.RepairResult{}, err
+	}
+	defer func() { repairErr = errors.Join(repairErr, deps.close()) }()
+	return deps.seckillService(cfg, logger).RepairCompensation(ctx, id, apply)
 }

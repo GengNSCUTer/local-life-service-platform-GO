@@ -113,6 +113,10 @@ func retryableTransaction(err error) bool {
 }
 
 func (s *Service) syncResolution(ctx context.Context, event orderEvent) (reason string, syncErr error) {
+	return s.syncResolutionWithGuard(ctx, event, "")
+}
+
+func (s *Service) syncResolutionWithGuard(ctx context.Context, event orderEvent, totalStock string) (reason string, syncErr error) {
 	started := time.Now()
 	defer func() { s.observe(started, "compensation", operationOutcome(syncErr)) }()
 	var state struct {
@@ -135,7 +139,7 @@ func (s *Service) syncResolution(ctx context.Context, event orderEvent) (reason 
 		}
 		stockLimit = strconv.FormatUint(uint64(activity.RemainingStock), 10)
 	}
-	err := s.compensate(ctx, event, stockLimit)
+	err := s.compensate(ctx, event, stockLimit, totalStock)
 	if err != nil {
 		message := err.Error()
 		if len(message) > 512 {

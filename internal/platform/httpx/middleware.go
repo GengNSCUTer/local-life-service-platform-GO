@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const requestIDHeader = "X-Request-ID"
@@ -22,13 +23,17 @@ func AccessLog(logger *slog.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		c.Next()
-		logger.Info("http request",
+		fields := []any{
 			"request_id", c.Writer.Header().Get(requestIDHeader),
 			"method", c.Request.Method,
 			"route", c.FullPath(),
 			"status", c.Writer.Status(),
 			"duration_ms", time.Since(start).Milliseconds(),
-		)
+		}
+		if span := trace.SpanContextFromContext(c.Request.Context()); span.IsSampled() {
+			fields = append(fields, "trace_id", span.TraceID().String())
+		}
+		logger.Info("http request", fields...)
 	}
 }
 

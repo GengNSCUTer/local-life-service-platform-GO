@@ -40,6 +40,7 @@ type Service struct {
 	logger  *slog.Logger
 	adminID uint64
 	loads   [64]chan struct{}
+	breaker *shopBreaker
 }
 
 func New(db *gorm.DB, cache *redis.Client, logger *slog.Logger, adminID uint64) *Service {
@@ -93,7 +94,7 @@ func (s *Service) detail(ctx context.Context, id uint64) (shopRecord, error) {
 			return item, err
 		}
 	}
-	item, err := s.shops.find(ctx, id)
+	item, err := s.breaker.find(ctx, s.shops, id)
 	if cacheErr == nil && (err == nil || errors.Is(err, gorm.ErrRecordNotFound)) {
 		s.saveDetail(ctx, key, observed, item, err)
 	}

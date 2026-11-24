@@ -20,6 +20,15 @@ const backgroundLoops = 3
 
 // RunWorker owns the background jobs and serves only health endpoints.
 func RunWorker(ctx context.Context, cfg config.Config, logger *slog.Logger) (runErr error) {
+	stopTracing, err := observe.StartTracing(ctx, "hmdp-worker", cfg.TraceEndpoint, cfg.TraceSampleRatio)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := stopTracing(); err != nil {
+			logger.Warn("stop trace exporter", "error", err)
+		}
+	}()
 	deps, err := openClients(cfg, true)
 	if err != nil {
 		return err

@@ -9,8 +9,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/platform/observe"
 	"github.com/redis/go-redis/v9"
 	"github.com/segmentio/kafka-go"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 )
 
@@ -128,7 +132,7 @@ func (s *Service) pollQueues(ctx context.Context, cursor *atomic.Uint64, poll fu
 	return redis.Nil
 }
 
-func (s *Service) publishOnShard(ctx context.Context, writer *kafka.Writer, shard redisShard) error {
+func (s *Service) publishOnShard(ctx context.Context, writer *kafka.Writer, shard redisShard) (publishErr error) {
 	// Leave time to try another shard if this slot's primary is unavailable.
 	claimCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	id, err := claimDue.Run(claimCtx, s.redisFor(shard), []string{shard.outbox()}, 15000).Text()
@@ -136,15 +140,29 @@ func (s *Service) publishOnShard(ctx context.Context, writer *kafka.Writer, shar
 	if err != nil {
 		return err
 	}
-	_, payload, err := s.reservation(ctx, id)
+	event, payload, err := s.reservation(ctx, id)
 	if errors.Is(err, errUnreadableReservation) {
 		return s.retireUnreadableReservation(ctx, shard, id)
 	}
 	if err != nil {
 		return fmt.Errorf("load outbox event %s: %w", id, err)
 	}
+	ctx, span := observe.StartSpan(observe.RestoreTrace(ctx, event.TraceHeaders), "outbox.publish", trace.SpanKindProducer)
+	defer func() {
+		if publishErr != nil {
+			span.SetStatus(codes.Error, "outbox publish or cleanup failed")
+		}
+		span.End()
+	}()
+	if span.IsRecording() {
+		span.SetAttributes(attribute.String("order.id", id), attribute.String("messaging.destination.name", orderTopic))
+	}
+	message := kafka.Message{Topic: orderTopic, Key: []byte(id), Value: payload}
+	for key, value := range observe.TraceHeaders(ctx) {
+		message.Headers = append(message.Headers, kafka.Header{Key: key, Value: []byte(value)})
+	}
 	started := time.Now()
-	err = writer.WriteMessages(ctx, kafka.Message{Topic: orderTopic, Key: []byte(id), Value: payload})
+	err = writer.WriteMessages(ctx, message)
 	s.observe(started, "kafka_publish", operationOutcome(err))
 	if err != nil {
 		return fmt.Errorf("publish order %s: %w", id, err)
@@ -267,12 +285,40 @@ func (s *Service) consume(ctx context.Context, reader *kafka.Reader, writer *kaf
 	}
 }
 
-func (s *Service) processMessage(ctx context.Context, writer *kafka.Writer, message kafka.Message) error {
+func (s *Service) processMessage(ctx context.Context, writer *kafka.Writer, message kafka.Message) (processErr error) {
+	var headers map[string]string
+	for _, header := range message.Headers {
+		if (header.Key != "traceparent" && header.Key != "tracestate") || len(header.Value) > 512 {
+			continue
+		}
+		if headers == nil {
+			headers = make(map[string]string, 2)
+		}
+		headers[header.Key] = string(header.Value)
+	}
+	ctx, span := observe.StartSpan(observe.RestoreTrace(ctx, headers), "kafka.process_order", trace.SpanKindConsumer)
+	defer func() {
+		if processErr != nil {
+			span.SetStatus(codes.Error, "order processing failed")
+		}
+		span.End()
+	}()
+	if span.IsRecording() {
+		span.SetAttributes(attribute.Int("messaging.destination.partition.id", message.Partition), attribute.Int64("messaging.kafka.offset", message.Offset))
+	}
 	var event orderEvent
 	reason := reasonInvalidEvent
 	if err := json.Unmarshal(message.Value, &event); err == nil && event.valid(string(message.Key)) {
 		started := time.Now()
-		err := persistOrder(ctx, s.db, event)
+		if span.IsRecording() {
+			span.SetAttributes(attribute.String("order.id", event.ID))
+		}
+		dbCtx, dbSpan := observe.StartSpan(ctx, "mysql.persist_order", trace.SpanKindClient)
+		err := persistOrder(dbCtx, s.db, event)
+		if err != nil {
+			dbSpan.SetStatus(codes.Error, "order transaction failed")
+		}
+		dbSpan.End()
 		outcome := operationOutcome(err)
 		switch {
 		case errors.Is(err, errOrderConflict):

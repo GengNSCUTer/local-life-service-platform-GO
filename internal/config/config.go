@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -29,6 +30,11 @@ type Config struct {
 	MediaBucket            string
 	MediaPublicURL         string
 	SocialPullAuthorIDs    string
+	TraceEndpoint          string
+	TraceSampleRatio       float64
+	AuthCodeIPLimit        int
+	SeckillUserLimit       int
+	ShopBreakerEnabled     bool
 	MySQLAddr              string
 	MySQLUser              string
 	MySQLPassword          string
@@ -76,6 +82,11 @@ func Load() Config {
 	if voucherErr != nil {
 		voucherAdminUserID = 0
 	}
+	traceRatio, err := strconv.ParseFloat(env("TRACE_SAMPLE_RATIO", "0.01"), 64)
+	if err != nil || math.IsNaN(traceRatio) || traceRatio < 0 || traceRatio > 1 {
+		traceRatio = 0.01
+	}
+	shopBreaker, _ := strconv.ParseBool(env("SHOP_MYSQL_BREAKER", "true"))
 	return Config{
 		HTTPAddr:               env("HTTP_ADDR", "127.0.0.1:8080"),
 		HTTPIdleTimeout:        durationEnv("HTTP_IDLE_TIMEOUT", time.Minute),
@@ -97,6 +108,11 @@ func Load() Config {
 		MediaBucket:            env("MEDIA_S3_BUCKET", ""),
 		MediaPublicURL:         env("MEDIA_PUBLIC_URL", ""),
 		SocialPullAuthorIDs:    env("SOCIAL_PULL_AUTHOR_IDS", ""),
+		TraceEndpoint:          env("TRACE_OTLP_ENDPOINT", ""),
+		TraceSampleRatio:       traceRatio,
+		AuthCodeIPLimit:        nonNegativeIntEnv("AUTH_CODE_IP_LIMIT", 20),
+		SeckillUserLimit:       nonNegativeIntEnv("SECKILL_USER_LIMIT", 0),
+		ShopBreakerEnabled:     shopBreaker,
 		MySQLAddr:              env("MYSQL_ADDR", localAddr("MYSQL_PORT", "23306")),
 		MySQLUser:              env("MYSQL_USER", "hmdp"),
 		MySQLPassword:          env("MYSQL_PASSWORD", "hmdp_dev_mysql"),
@@ -136,6 +152,14 @@ func env(key, fallback string) string {
 func positiveIntEnv(key string, fallback int) int {
 	value, err := strconv.Atoi(env(key, strconv.Itoa(fallback)))
 	if err != nil || value < 1 {
+		return fallback
+	}
+	return value
+}
+
+func nonNegativeIntEnv(key string, fallback int) int {
+	value, err := strconv.Atoi(env(key, strconv.Itoa(fallback)))
+	if err != nil || value < 0 {
 		return fallback
 	}
 	return value

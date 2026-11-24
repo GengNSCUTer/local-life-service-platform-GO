@@ -38,6 +38,8 @@ Compose 启动本地 MySQL、Redis 主节点、Redis 副本、三个 Redis Senti
 
 高扇出作者可使用[社交通知推拉结合](docs/20-social-notification-fanout.md)。启用前应用迁移 `012`。
 
+秒杀链路追踪、共享限流、店铺回源熔断和库存补偿命令见[治理和故障演练](docs/21-seckill-governance.md)。手动补偿审计使用迁移 `013`。
+
 [阶段 6 秒杀监控与对账](docs/12-seckill-operations.md)记录 Prometheus、pprof、库存审计、Kafka 高可用配置和故障演练结果。
 
 [阶段 7 API 与 Worker 拆分](docs/13-split-api-worker.md)包含独立启动、部署回滚、备份恢复和持续压测。单进程联调可以运行 `go run ./cmd/all`。

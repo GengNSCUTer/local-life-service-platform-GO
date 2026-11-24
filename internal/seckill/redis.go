@@ -87,6 +87,22 @@ return due[1]
 
 var compensateReservation = redis.NewScript(`
 local resolutionKey = KEYS[3]
+local total = tonumber(ARGV[5])
+if total then
+    local stock = tonumber(redis.call('HGET', KEYS[1], 'stock'))
+    if not stock or stock < 0 or stock > total then
+        return 2
+    end
+    if stock + redis.call('HLEN', KEYS[2]) ~= total then
+        return 2
+    end
+    for i = 5, 6 do
+        local kind = redis.call('TYPE', KEYS[i]).ok
+        if kind ~= 'none' and kind ~= 'zset' then
+            return 2
+        end
+    end
+end
 if redis.call('EXISTS', resolutionKey) == 1 then
     return 0
 end
@@ -148,12 +164,12 @@ func (s *Service) reservation(ctx context.Context, id string) (orderEvent, []byt
 	return orderEvent{}, nil, errUnreadableReservation
 }
 
-func (s *Service) compensate(ctx context.Context, event orderEvent, stockLimit string) error {
+func (s *Service) compensate(ctx context.Context, event orderEvent, stockLimit, totalStock string) error {
 	shard := orderShard(event.ID)
 	key := shard.activity(event.VoucherID)
 	result, err := compensateReservation.Run(ctx, s.redisFor(shard),
 		[]string{key, key + ":buyers", shard.prefix() + "resolution:" + event.ID, orderKey(event.ID), shard.outbox(), shard.timeouts(), reservationBackupKey(event.ID)},
-		strconv.FormatUint(event.UserID, 10), event.ID, resolutionMarkerTTL.Milliseconds(), stockLimit).Int()
+		strconv.FormatUint(event.UserID, 10), event.ID, resolutionMarkerTTL.Milliseconds(), stockLimit, totalStock).Int()
 	if err == nil && result == 2 {
 		return errReservationMismatch
 	}

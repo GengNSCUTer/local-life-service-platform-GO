@@ -50,6 +50,21 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		}
 		return json.NewEncoder(os.Stdout).Encode(audit)
 	}
+	if args[0] == "repair-seckill" {
+		flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
+		id := flags.String("order-id", "", "cancelled order ID")
+		apply := flags.Bool("apply", false, "retry the pending Redis compensation")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *id == "" || flags.NArg() != 0 {
+			return errors.New("provide an order ID")
+		}
+		ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+		result, err := app.RepairSeckill(ctx, cfg, logger, *id, *apply)
+		return errors.Join(err, json.NewEncoder(os.Stdout).Encode(result))
+	}
 	if args[0] != "prepare-seckill" {
 		return fmt.Errorf("unknown command %q", args[0])
 	}

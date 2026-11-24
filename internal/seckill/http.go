@@ -13,9 +13,12 @@ import (
 	"time"
 
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/platform/httpx"
+	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/platform/observe"
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/user"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 )
 
@@ -47,9 +50,9 @@ func New(db *gorm.DB, cache *redis.Client, logger *slog.Logger, pendingTimeout t
 	return &Service{db: db, redis: cache, shardRedis: layout.Cluster, layout: layout, logger: logger, pendingTimeout: pendingTimeout, outboxLimit: outboxLimit, pendingLimit: pendingLimit}
 }
 
-func (s *Service) Register(router *gin.Engine, requireLogin gin.HandlerFunc) {
+func (s *Service) Register(router *gin.Engine, requireLogin, submitLimit gin.HandlerFunc) {
 	orders := router.Group("/voucher-order", requireLogin)
-	orders.POST("/seckill/:id", s.submit)
+	orders.POST("/seckill/:id", submitLimit, s.submit)
 	orders.GET("/:id", s.status)
 	orders.GET("", s.listOrders)
 	orders.POST("/:id/cancel", s.cancel)
@@ -104,14 +107,22 @@ func (s *Service) submit(c *gin.Context) {
 	}
 }
 
-func (s *Service) reserve(ctx context.Context, voucherID, userID uint64) ([]string, error) {
+func (s *Service) reserve(ctx context.Context, voucherID, userID uint64) (_ []string, reserveErr error) {
+	ctx, span := observe.StartSpan(ctx, "redis.reserve", trace.SpanKindClient)
+	defer func() {
+		if reserveErr != nil {
+			span.SetStatus(codes.Error, "Redis reservation failed")
+		}
+		span.End()
+	}()
+	headers := observe.TraceHeaders(ctx)
 	shards := [2]redisShard{0, activityShard(voucherID)}
 	if s.layout.Sharded {
 		shards[0], shards[1] = shards[1], shards[0]
 	}
 	var result []string
 	for _, shard := range shards {
-		event := orderEvent{Version: 1, ID: shard.newOrderID(), VoucherID: voucherID, UserID: userID, CreatedAt: time.Now().UTC()}
+		event := orderEvent{Version: 1, ID: shard.newOrderID(), VoucherID: voucherID, UserID: userID, CreatedAt: time.Now().UTC(), TraceHeaders: headers}
 		payload, err := json.Marshal(event)
 		if err != nil {
 			return nil, err

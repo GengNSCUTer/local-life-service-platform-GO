@@ -11,6 +11,7 @@ import (
 
 	"github.com/GengNSCUTer/local-life-service-platform-GO/internal/platform/httpx"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
@@ -25,6 +26,7 @@ type loginRequest struct {
 }
 
 type identityKey struct{}
+type visitorUnavailableKey struct{}
 
 type identity struct {
 	profile profile
@@ -37,9 +39,13 @@ func CurrentID(ctx context.Context) (uint64, bool) {
 	return current.profile.ID, ok
 }
 
-func (s *Service) Register(router *gin.Engine) {
+func VisitorIdentityAvailable(ctx context.Context) bool {
+	return ctx.Value(visitorUnavailableKey{}) == nil
+}
+
+func (s *Service) Register(router *gin.Engine, codeLimit gin.HandlerFunc) {
 	users := router.Group("/user")
-	users.POST("/code", s.requestCode)
+	users.POST("/code", codeLimit, s.requestCode)
 	users.POST("/login", s.createSession)
 
 	protected := users.Group("", s.RequireLogin())
@@ -107,13 +113,15 @@ func (s *Service) VisitorLogin(c *gin.Context) {
 	token := authorizationToken(c.GetHeader("Authorization"))
 	if token != "" && len(token) <= 256 {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 25*time.Millisecond)
-		values, err := readSession.Run(ctx, s.cache, []string{sessionKey(token)},
-			sessionRenew.Milliseconds(), sessionTTL.Milliseconds()).StringSlice()
+		value, err := s.cache.HGet(ctx, sessionKey(token), "id").Result()
 		cancel()
-		if err == nil && len(values) == 3 {
-			if id, err := strconv.ParseUint(values[0], 10, 64); err == nil && id != 0 {
+		switch {
+		case err == nil:
+			if id, err := strconv.ParseUint(value, 10, 64); err == nil && id != 0 {
 				c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), identityKey{}, identity{profile: profile{ID: id}}))
 			}
+		case !errors.Is(err, redis.Nil):
+			c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), visitorUnavailableKey{}, true))
 		}
 	}
 	c.Next()
