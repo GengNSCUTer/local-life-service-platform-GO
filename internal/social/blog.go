@@ -3,10 +3,7 @@ package social
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -19,17 +16,17 @@ var errInvalidShop = errors.New("shop not found")
 var errInvalidFollow = errors.New("follow target must be another existing user")
 
 type Service struct {
-	db             *gorm.DB
-	cache          *redis.Client
-	logger         *slog.Logger
-	pullAuthors    map[uint64]struct{}
-	bucketCounters bool
-	detailCache    bool
-	boundedFeed    bool
-	writeSlots     chan struct{}
-	detailReads    chan struct{}
-	fanoutWorkers  int
-	metrics        *metrics
+	db               *gorm.DB
+	cache            *redis.Client
+	logger           *slog.Logger
+	pullMinFollowers int
+	bucketCounters   bool
+	detailCache      bool
+	boundedFeed      bool
+	writeSlots       chan struct{}
+	detailReads      chan struct{}
+	fanoutWorkers    int
+	metrics          *metrics
 }
 
 func New(db *gorm.DB, cache *redis.Client, logger *slog.Logger) *Service {
@@ -44,21 +41,10 @@ func (s *Service) ConfigureCapacity(buckets, detailCache, boundedFeed bool, writ
 	s.fanoutWorkers = fanoutWorkers
 }
 
-// ConfigurePullAuthors runs before routes are registered.
-func (s *Service) ConfigurePullAuthors(list string) error {
-	if strings.TrimSpace(list) == "" {
-		return nil
-	}
-	authors := make(map[uint64]struct{})
-	for token := range strings.SplitSeq(list, ",") {
-		id, err := strconv.ParseUint(strings.TrimSpace(token), 10, 64)
-		if err != nil || id == 0 {
-			return fmt.Errorf("SOCIAL_PULL_AUTHOR_IDS must contain positive author IDs")
-		}
-		authors[id] = struct{}{}
-	}
-	s.pullAuthors = authors
-	return nil
+// ConfigureNotificationPull sets the inclusive follower threshold before routes are registered.
+// Zero keeps all new posts in push mode.
+func (s *Service) ConfigureNotificationPull(minFollowers int) {
+	s.pullMinFollowers = minFollowers
 }
 
 type blogInput struct {
@@ -97,9 +83,6 @@ type profile struct {
 
 func (s *Service) publish(ctx context.Context, author uint64, input blogInput) (uint64, error) {
 	item := Blog{ShopID: input.ShopID, UserID: author, Title: input.Title, Images: input.Images, Content: input.Content}
-	if _, ok := s.pullAuthors[author]; ok {
-		item.NotificationMode = notificationPull
-	}
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var shop struct{ ID uint64 }
 		if err := tx.Table("tb_shop").Select("id").Take(&shop, "id = ?", input.ShopID).Error; err != nil {
@@ -107,6 +90,18 @@ func (s *Service) publish(ctx context.Context, author uint64, input blogInput) (
 				return errInvalidShop
 			}
 			return err
+		}
+		if s.pullMinFollowers > 0 {
+			var reachedThreshold bool
+			// idx_followers covers this lookup. Stop after the threshold's last entry.
+			if err := tx.Raw(`SELECT EXISTS (SELECT 1 FROM social_follows FORCE INDEX (idx_followers)
+				WHERE follow_user_id = ? ORDER BY user_id LIMIT 1 OFFSET ?)`,
+				author, s.pullMinFollowers-1).Row().Scan(&reachedThreshold); err != nil {
+				return err
+			}
+			if reachedThreshold {
+				item.NotificationMode = notificationPull
+			}
 		}
 		if err := tx.Table("tb_blog").Create(&item).Error; err != nil {
 			return err

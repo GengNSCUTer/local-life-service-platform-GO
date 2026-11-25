@@ -3,10 +3,17 @@
 run_social_capacity() {
     local followers=${SOCIAL_TEST_FOLLOWERS:-100000} results="$work/social-results.json"
     [[ "$followers" =~ ^[1-9][0-9]{0,6}$ && "$followers" -le 1000000 ]]
+    local threshold=${SOCIAL_PULL_MIN_FOLLOWERS:-10000} mismatched
+    [[ "$threshold" =~ ^[0-9]+$ && ${#threshold} -le 9 ]]
     python3 scripts/social_capacity.py seed "$followers" | "${mysql[@]}" "$MYSQL_DATABASE" > "$work/social-seed.log"
     local rows
     rows=$("${mysql[@]}" -N "$MYSQL_DATABASE" -e 'SELECT COUNT(*) FROM social_follows WHERE follow_user_id = 2')
     [[ "$rows" == "$followers" ]]
+    if (( 10#$threshold > 0 )); then
+        "${mysql[@]}" -N "$MYSQL_DATABASE" -e "EXPLAIN ANALYZE SELECT EXISTS (SELECT 1
+            FROM social_follows FORCE INDEX (idx_followers) WHERE follow_user_id = 2 ORDER BY user_id LIMIT 1 OFFSET $((10#$threshold-1)))" \
+            | tee "$work/social-mode-plan.txt"
+    fi
     for id in 1 2 3 7 101 "$((followers+100))"; do
         "${redis[@]}" HSET "login:token:social-$id" id "$id" >/dev/null
     done
@@ -33,6 +40,10 @@ run_social_capacity() {
     local outbox
     outbox=$("${mysql[@]}" -N "$MYSQL_DATABASE" -e 'SELECT COUNT(*) FROM social_blog_outbox')
     [[ "$outbox" == 0 ]]
+    # The measurement unsubscribes one follower after publishing. Check against the seeded counts.
+    mismatched=$("${mysql[@]}" -N "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM tb_blog b
+        WHERE b.notification_mode <> ($threshold > 0 AND (CASE b.user_id WHEN 7 THEN 2 ELSE $followers END) >= $threshold)")
+    [[ "$mismatched" == 0 ]]
     local pending
     for attempt in {1..60}; do
         pending=$("${mysql[@]}" -N "$MYSQL_DATABASE" -e 'SELECT COUNT(*) FROM social_fanout_tasks WHERE due_at IS NOT NULL')

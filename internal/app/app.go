@@ -86,9 +86,7 @@ func runAPI(ctx context.Context, cfg config.Config, logger *slog.Logger, startWo
 	community := social.New(deps.mysql, deps.redis, logger)
 	community.ConfigureCapacity(cfg.SocialCounterBuckets, cfg.SocialDetailCache, cfg.SocialBoundedFeed, cfg.SocialWriteLimit, cfg.SocialFanoutWorkers)
 	community.RegisterMetrics(registry, startWorkers)
-	if err := community.ConfigurePullAuthors(cfg.SocialPullAuthorIDs); err != nil {
-		return err
-	}
+	community.ConfigureNotificationPull(cfg.SocialPullMinFollowers)
 	community.Register(router, requireLogin, users.OptionalLogin())
 	if startWorkers {
 		workerCtx, stop := context.WithCancel(context.WithoutCancel(ctx))

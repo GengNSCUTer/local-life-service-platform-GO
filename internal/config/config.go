@@ -29,7 +29,7 @@ type Config struct {
 	MediaSecretKey         string
 	MediaBucket            string
 	MediaPublicURL         string
-	SocialPullAuthorIDs    string
+	SocialPullMinFollowers int
 	SocialCounterBuckets   bool
 	SocialDetailCache      bool
 	SocialBoundedFeed      bool
@@ -116,7 +116,7 @@ func Load() Config {
 		MediaSecretKey:         env("MEDIA_S3_SECRET_KEY", ""),
 		MediaBucket:            env("MEDIA_S3_BUCKET", ""),
 		MediaPublicURL:         env("MEDIA_PUBLIC_URL", ""),
-		SocialPullAuthorIDs:    env("SOCIAL_PULL_AUTHOR_IDS", ""),
+		SocialPullMinFollowers: nonNegativeIntEnv("SOCIAL_PULL_MIN_FOLLOWERS", 10000),
 		SocialCounterBuckets:   socialBuckets,
 		SocialDetailCache:      socialCache,
 		SocialBoundedFeed:      socialFeed,
