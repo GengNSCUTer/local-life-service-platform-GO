@@ -65,6 +65,7 @@ func RunWorker(ctx context.Context, cfg config.Config, logger *slog.Logger) (run
 	service := deps.seckillService(cfg, logger)
 	service.RegisterMetrics(registry, true)
 	community := social.New(deps.mysql, deps.redis, logger)
+	community.ConfigureNotificationCache(deps.notificationRedis)
 	community.ConfigureCapacity(cfg.SocialCounterBuckets, cfg.SocialDetailCache, cfg.SocialBoundedFeed, cfg.SocialWriteLimit, cfg.SocialFanoutWorkers)
 	community.RegisterMetrics(registry, true)
 	workerCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))

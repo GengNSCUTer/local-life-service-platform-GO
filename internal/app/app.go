@@ -84,6 +84,7 @@ func runAPI(ctx context.Context, cfg config.Config, logger *slog.Logger, startWo
 	vouchers := voucher.New(deps.mysql, logger, cfg.VoucherAdminUserID, service)
 	vouchers.Register(router, requireLogin)
 	community := social.New(deps.mysql, deps.redis, logger)
+	community.ConfigureNotificationCache(deps.notificationRedis)
 	community.ConfigureCapacity(cfg.SocialCounterBuckets, cfg.SocialDetailCache, cfg.SocialBoundedFeed, cfg.SocialWriteLimit, cfg.SocialFanoutWorkers)
 	community.RegisterMetrics(registry, startWorkers)
 	community.ConfigureNotificationPull(cfg.SocialPullMinFollowers)

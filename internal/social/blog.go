@@ -16,21 +16,22 @@ var errInvalidShop = errors.New("shop not found")
 var errInvalidFollow = errors.New("follow target must be another existing user")
 
 type Service struct {
-	db               *gorm.DB
-	cache            *redis.Client
-	logger           *slog.Logger
-	pullMinFollowers int
-	bucketCounters   bool
-	detailCache      bool
-	boundedFeed      bool
-	writeSlots       chan struct{}
-	detailReads      chan struct{}
-	fanoutWorkers    int
-	metrics          *metrics
+	db                *gorm.DB
+	cache             *redis.Client
+	notificationCache *redis.Client
+	logger            *slog.Logger
+	pullMinFollowers  int
+	bucketCounters    bool
+	detailCache       bool
+	boundedFeed       bool
+	writeSlots        chan struct{}
+	detailReads       chan struct{}
+	fanoutWorkers     int
+	metrics           *metrics
 }
 
 func New(db *gorm.DB, cache *redis.Client, logger *slog.Logger) *Service {
-	return &Service{db: db, cache: cache, logger: logger, detailReads: make(chan struct{}, 4)}
+	return &Service{db: db, cache: cache, notificationCache: cache, logger: logger, detailReads: make(chan struct{}, 4)}
 }
 
 func (s *Service) ConfigureCapacity(buckets, detailCache, boundedFeed bool, writeLimit, fanoutWorkers int) {
@@ -38,7 +39,14 @@ func (s *Service) ConfigureCapacity(buckets, detailCache, boundedFeed bool, writ
 	if writeLimit > 0 {
 		s.writeSlots = make(chan struct{}, writeLimit)
 	}
-	s.fanoutWorkers = fanoutWorkers
+	s.fanoutWorkers = max(1, fanoutWorkers)
+}
+
+// ConfigureNotificationCache optionally separates notifications from the session Redis.
+func (s *Service) ConfigureNotificationCache(cache *redis.Client) {
+	if cache != nil {
+		s.notificationCache = cache
+	}
 }
 
 // ConfigureNotificationPull sets the inclusive follower threshold before routes are registered.

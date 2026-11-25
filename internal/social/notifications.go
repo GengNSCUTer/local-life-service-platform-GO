@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -32,6 +31,7 @@ func (s *Service) RunWorkers(ctx context.Context, brokers []string, client *kafk
 	defer func() { stop(); workers.Wait() }()
 	workers.Go(func() { s.counterWorker(local) })
 	workers.Go(func() { s.rankWorker(local) })
+	workers.Go(func() { s.pruneFanout(local) })
 	for range s.fanoutWorkers {
 		workers.Go(func() { s.fanoutWorker(local) })
 	}
@@ -111,14 +111,9 @@ func (s *Service) consume(ctx context.Context, reader *kafka.Reader) {
 			s.logger.Warn("invalid social Kafka event", "partition", message.Partition, "offset", message.Offset)
 		} else {
 			for ctx.Err() == nil {
-				var err error
-				if s.fanoutWorkers > 0 {
-					operation, cancel := context.WithTimeout(ctx, 5*time.Second)
-					err = s.enqueueFanout(operation, event)
-					cancel()
-				} else {
-					err = s.notifyFollowers(ctx, event)
-				}
+				operation, cancel := context.WithTimeout(ctx, 5*time.Second)
+				err := s.enqueueFanout(operation, event)
+				cancel()
 				if err == nil {
 					break
 				}
@@ -151,29 +146,15 @@ redis.call('EXPIRE', KEYS[1], ARGV[3])
 return 1
 `)
 
-func (s *Service) notifyFollowers(ctx context.Context, event publishedBlog) error {
-	var last uint64
-	for ctx.Err() == nil {
-		operation, cancel := context.WithTimeout(ctx, 5*time.Second)
-		followers, err := s.notifyBatch(operation, event, last)
-		cancel()
-		if err != nil || len(followers) < fanoutBatchSize {
-			return err
-		}
-		last = followers[len(followers)-1]
-	}
-	return ctx.Err()
-}
-
-func (s *Service) notifyBatch(ctx context.Context, event publishedBlog, last uint64) ([]uint64, error) {
+func (s *Service) notifyBatch(ctx context.Context, event publishedBlog, last, end uint64) ([]uint64, error) {
 	var followers []uint64
-	err := s.db.WithContext(ctx).Table("social_follows").Where("follow_user_id = ? AND user_id > ?", event.AuthorID, last).
+	err := s.db.WithContext(ctx).Table("social_follows").Where("follow_user_id = ? AND user_id > ? AND user_id <= ?", event.AuthorID, last, end).
 		Order("user_id").Limit(fanoutBatchSize).Pluck("user_id", &followers).Error
 	if err != nil || len(followers) == 0 {
 		return followers, err
 	}
 	blogID := strconv.FormatUint(event.BlogID, 10)
-	_, err = s.cache.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+	_, err = s.notificationCache.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 		for _, id := range followers {
 			storeNotification.Eval(ctx, pipe, []string{notificationKey(id)}, event.CreatedAt.UnixMilli(), blogID, int(notificationRetention/time.Second))
 		}
@@ -182,38 +163,72 @@ func (s *Service) notifyBatch(ctx context.Context, event publishedBlog, last uin
 	return followers, err
 }
 
+// Restore eligible push entries without displacing fresher entries written by workers.
+var repairNotifications = redis.NewScript(`
+local count = redis.call('ZCARD', KEYS[1])
+local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+local inserted = 0
+for i = 2, #ARGV, 2 do
+    local score = tonumber(ARGV[i])
+    local cutoff = tonumber(oldest[2])
+    if count < 100 or score > cutoff or (score == cutoff and ARGV[i+1] > oldest[1]) then
+        if not redis.call('ZSCORE', KEYS[1], ARGV[i+1]) then
+            inserted = inserted + redis.call('ZADD', KEYS[1], ARGV[i], ARGV[i+1])
+        end
+    end
+end
+if inserted > 0 then
+    redis.call('ZREMRANGEBYRANK', KEYS[1], 0, -101)
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return inserted
+`)
+
+func (s *Service) loadNotifications(ctx context.Context, viewer uint64) ([]blogView, error) {
+	items := make([]blogView, 0)
+	// Bound each author's contribution before joining blog bodies and merging the page.
+	head := s.db.WithContext(ctx).Raw(`SELECT recent.id, recent.create_time FROM social_follows AS f
+		JOIN LATERAL (SELECT b.id, b.create_time FROM tb_blog b FORCE INDEX (idx_blog_author_recent)
+		WHERE b.user_id = f.follow_user_id AND b.create_time >= TIMESTAMPADD(SECOND, ?, CURRENT_TIMESTAMP)
+		ORDER BY b.create_time DESC, b.id DESC LIMIT ?) AS recent ON TRUE
+		WHERE f.user_id = ? ORDER BY recent.create_time DESC, recent.id DESC LIMIT ?`, -int(notificationRetention/time.Second), notificationLimit, viewer, notificationLimit)
+	err := s.blogs(ctx, viewer).
+		Select(blogViewColumns+", b.notification_mode").Joins("JOIN (?) AS head ON head.id = b.id", head).
+		Order("head.create_time DESC, head.id DESC").Find(&items).Error
+	return items, err
+}
+
 func (s *Service) notifications(c *gin.Context) {
 	ctx, cancel, viewer := requestContext(c)
 	defer cancel()
-	members, err := s.cache.ZRevRange(ctx, notificationKey(viewer), 0, notificationLimit-1).Result()
-	if err != nil {
-		s.respond(c, nil, err)
-		return
-	}
-	ids := make([]uint64, 0, len(members))
-	for _, member := range members {
-		if id, err := strconv.ParseUint(member, 10, 64); err == nil {
-			ids = append(ids, id)
-		}
-	}
-	var pulled []uint64
-	err = s.db.WithContext(ctx).Table("social_follows AS f").
-		Joins("JOIN tb_blog AS b ON b.user_id = f.follow_user_id AND b.notification_mode = ?", notificationPull).
-		Where("f.user_id = ? AND b.create_time >= TIMESTAMPADD(SECOND, ?, CURRENT_TIMESTAMP)", viewer, -int(notificationRetention/time.Second)).
-		Order("b.id DESC").Limit(notificationLimit).Pluck("b.id", &pulled).Error
-	if err != nil {
-		s.respond(c, nil, err)
-		return
-	}
-	ids = append(ids, pulled...)
-	slices.Sort(ids)
-	ids = slices.Compact(ids)
-	items := make([]blogView, 0)
-	if len(ids) != 0 {
-		err = s.blogs(ctx, viewer).Joins("JOIN social_follows f ON f.follow_user_id = b.user_id AND f.user_id = ?", viewer).
-			Where("b.id IN ?", ids).Order("b.id DESC").Limit(notificationLimit).Find(&items).Error
+	items, err := s.loadNotifications(ctx, viewer)
+	if err == nil {
+		s.repairNotificationCache(ctx, viewer, items)
 	}
 	s.respond(c, items, err)
+}
+
+func (s *Service) repairNotificationCache(ctx context.Context, viewer uint64, items []blogView) {
+	args := make([]any, 1, 1+2*len(items))
+	args[0] = int(notificationRetention / time.Second)
+	for _, item := range items {
+		if item.NotificationMode == 0 {
+			args = append(args, item.CreatedAt.UnixMilli(), strconv.FormatUint(item.ID, 10))
+		}
+	}
+	if len(args) == 1 {
+		return
+	}
+	cacheCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	count, err := repairNotifications.Run(cacheCtx, s.notificationCache, []string{notificationKey(viewer)}, args...).Int()
+	if s.metrics != nil {
+		if err != nil {
+			s.metrics.notificationCache.WithLabelValues("unavailable").Inc()
+		} else if count > 0 {
+			s.metrics.notificationCache.WithLabelValues("repaired").Inc()
+		}
+	}
 }
 
 func wait(ctx context.Context, duration time.Duration) bool {

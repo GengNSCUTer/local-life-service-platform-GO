@@ -50,7 +50,10 @@ def measure(port, followers, seconds):
         return blog_id, start
 
     try:
-        popular = dict(publish(2, i) for i in range(3))
+        post_count = int(os.getenv("SOCIAL_TEST_POPULAR_POSTS", "3"))
+        if post_count < 1:
+            raise ValueError("SOCIAL_TEST_POPULAR_POSTS must be positive")
+        popular = dict(publish(2, i) for i in range(post_count))
         if os.getenv("SOCIAL_TEST_TWO_POPULAR") == "1":
             popular.update(publish(3, i + 5) for i in range(3))
         ordinary, ordinary_at = publish(7, 4)
@@ -72,7 +75,7 @@ def measure(port, followers, seconds):
                     viewers[viewer].setdefault(blog_id, round(elapsed - recorded, 3))
             latencies.append((elapsed - tick) * 1000)
             visits += 1
-            if elapsed - started >= 10 and all(popular.keys() <= viewers[v].keys() for v in (101, followers + 100)) and ordinary in viewers[1]:
+            if visits >= 200 and all(popular.keys() <= viewers[v].keys() for v in (101, followers + 100)) and ordinary in viewers[1]:
                 break
             time.sleep(max(0, started + visits * .05 - elapsed))
         else:

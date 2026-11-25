@@ -36,7 +36,7 @@ Compose 启动本地 MySQL、Redis 主节点、Redis 副本、三个 Redis Senti
 
 店铺 UV、博客评论和图片上传见[操作和源码入口](docs/19-uv-comments-media.md)。评论使用迁移 `011`。
 
-[社交通知](docs/20-social-notification-fanout.md)在发帖时按粉丝数自动选择推送或拉取，默认阈值为 1 万。使用迁移 `012` 保存每篇帖子的投递模式。
+[社交通知](docs/20-social-notification-fanout.md)在发帖时按粉丝数自动选择推送或拉取，默认阈值为 1 万。使用迁移 `012` 保存投递模式，`017` 提供分片、失败追踪和通知恢复。
 
 多级回复、爆帖分桶计数、详情缓存、榜单快照与持久化通知任务见[社交高并发说明与对照](docs/22-social-hot-workloads.md)。本轮使用迁移 `014` 和 `015`。
 

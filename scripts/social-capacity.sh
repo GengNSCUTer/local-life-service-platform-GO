@@ -17,7 +17,7 @@ run_social_capacity() {
     for id in 1 2 3 7 101 "$((followers+100))"; do
         "${redis[@]}" HSET "login:token:social-$id" id "$id" >/dev/null
     done
-    local before after
+    local before after started=$SECONDS
     before=$(social_zadds)
     python3 scripts/social_capacity.py measure "$followers" "$port" | tee "$results" & benchmark_pid=$!
     while kill -0 "$benchmark_pid" 2>/dev/null; do
@@ -31,7 +31,7 @@ run_social_capacity() {
     wait "$benchmark_pid"
     benchmark_pid=
     after=$(social_zadds)
-    printf 'Redis ZADD delta: %s\n' "$((after-before))" | tee "$work/social-redis.txt"
+    printf 'Redis ZADD delta during notification reads: %s\n' "$((after-before))" | tee "$work/social-redis.txt"
     "$KAFKA_BIN_DIR/kafka-consumer-groups.sh" --bootstrap-server "$KAFKA_BROKERS" \
         --describe --group hmdp-social-notifications-v1 | tee "$work/social-lag-final.log"
     awk '$2 == "hmdp.social.blog-published.v1" && $5 ~ /^[0-9]+$/ && $5 > 0 {
@@ -44,14 +44,26 @@ run_social_capacity() {
     mismatched=$("${mysql[@]}" -N "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM tb_blog b
         WHERE b.notification_mode <> ($threshold > 0 AND (CASE b.user_id WHEN 7 THEN 2 ELSE $followers END) >= $threshold)")
     [[ "$mismatched" == 0 ]]
-    local pending
-    for attempt in {1..60}; do
-        pending=$("${mysql[@]}" -N "$MYSQL_DATABASE" -e 'SELECT COUNT(*) FROM social_fanout_tasks WHERE due_at IS NOT NULL')
-        if [[ "$pending" == 0 ]]; then break; fi
-        sleep .25
+    local pending deadline=$((SECONDS+600))
+    while :; do
+        pending=$("${mysql[@]}" -N "$MYSQL_DATABASE" -e 'SELECT COUNT(*) FROM social_fanout_shards WHERE due_at IS NOT NULL')
+        if [[ "$pending" == 0 ]] || (( SECONDS >= deadline )); then break; fi
+        sleep 1
     done
     printf 'Pending durable fanout tasks: %s\n' "$pending" | tee "$work/social-task-pending.txt"
     [[ "$pending" == 0 ]]
+    [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e 'SELECT COUNT(*) FROM social_fanout_shards WHERE failed_at IS NOT NULL') == 0 ]]
+    after=$(social_zadds)
+    printf 'Redis ZADD delta after fanout drain: %s. Drain observed at %ss after workload start.\n' \
+        "$((after-before))" "$((SECONDS-started))" | tee "$work/social-drain.txt"
+    "${mysql[@]}" -N "$MYSQL_DATABASE" -e 'SELECT blog_id, COUNT(*) AS shards FROM social_fanout_shards GROUP BY blog_id' \
+        | tee "$work/social-shards.txt"
+    local hot_blog tail=$((followers+100))
+    if (( 10#$threshold == 0 || followers < 10#$threshold )); then
+        while IFS= read -r hot_blog; do
+            [[ -n $("${redis[@]}" ZSCORE "social:notifications:$tail" "$hot_blog") ]]
+        done < <("${mysql[@]}" -N "$MYSQL_DATABASE" -e 'SELECT id FROM tb_blog WHERE user_id = 2 ORDER BY id')
+    fi
 }
 
 social_zadds() {

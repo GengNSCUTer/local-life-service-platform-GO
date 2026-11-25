@@ -158,17 +158,19 @@ social_hot_failures() {
     "${redis[@]}" CLIENT PAUSE 9000 WRITE >/dev/null
     start_worker
     for attempt in {1..100}; do
-        if [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM social_fanout_tasks WHERE blog_id=$blog AND lease_token IS NOT NULL") == 1 ]]; then break; fi
+        if [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM social_fanout_shards WHERE blog_id=$blog AND lease_token IS NOT NULL") -ge 1 ]]; then break; fi
         sleep .05
     done
-    [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM social_fanout_tasks WHERE blog_id=$blog AND lease_token IS NOT NULL") == 1 ]]
+    [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM social_fanout_shards WHERE blog_id=$blog AND lease_token IS NOT NULL") -ge 1 ]]
     kill -KILL "$worker_pid"; wait "$worker_pid" 2>/dev/null || true; worker_pid=
     start_worker
     for attempt in {1..150}; do
-        if [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM social_fanout_tasks WHERE blog_id=$blog AND due_at IS NULL") == 1 ]]; then break; fi
+        if [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM social_fanout_shards WHERE blog_id=$blog AND due_at IS NOT NULL") == 0 ]]; then break; fi
         sleep .2
     done
-    [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM social_fanout_tasks WHERE blog_id=$blog AND due_at IS NULL") == 1 ]]
+    [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM social_fanout_shards WHERE blog_id=$blog AND due_at IS NOT NULL") == 0 ]]
+    [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM social_fanout_shards WHERE blog_id=$blog AND due_at IS NULL AND failed_at IS NULL") -ge 1 ]]
+    [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM social_fanout_shards WHERE blog_id=$blog AND failed_at IS NOT NULL") == 0 ]]
     [[ $("${mysql[@]}" -N "$MYSQL_DATABASE" -e "SELECT COUNT(*) FROM social_blog_outbox WHERE blog_id=$blog") == 0 ]]
     for id in 2 2048 4096; do
         [[ -n $("${redis[@]}" ZSCORE "social:notifications:$id" "$blog") ]]

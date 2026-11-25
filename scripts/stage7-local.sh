@@ -47,6 +47,7 @@ export HTTP_ADDR="127.0.0.1:$port" MYSQL_ADDR="127.0.0.1:$((port+1))" REDIS_ADDR
 export KAFKA_BROKERS="127.0.0.1:$((port+3))" WORKER_HEALTH_ADDR="127.0.0.1:$((port+5))"
 export MYSQL_DATABASE=hmdp_stage7 MYSQL_USER=hmdp_stage7 MYSQL_PASSWORD=stage7_local_mysql
 export REDIS_PASSWORD=stage7_local_redis REDISCLI_AUTH=stage7_local_redis REDIS_SENTINEL_ADDRS= GIN_MODE=release
+export SOCIAL_NOTIFICATION_REDIS_ADDR= SOCIAL_NOTIFICATION_REDIS_PASSWORD=
 export SECKILL_OUTBOX_LIMIT=0 SECKILL_PENDING_LIMIT=0 SECKILL_PENDING_TIMEOUT=15m KAFKA_CONSUMER_WORKERS=${KAFKA_CONSUMER_WORKERS:-3}
 mysql=("$MYSQL_BIN_DIR/mysql" --no-defaults -u root --socket="$work/mysql.sock")
 redis=("$redis_bin/redis-cli" --raw -p "$((port+2))")
@@ -152,6 +153,7 @@ start_redis() {
     mkdir -p "$1"
     local fsync=always
     if [[ "$mode" == orders || "$mode" == worker-scale ]]; then fsync=everysec; fi
+    if [[ "$mode" == social ]]; then fsync=${SOCIAL_TEST_REDIS_AOF_FSYNC:-always}; fi
     "$redis_bin/redis-server" --bind 127.0.0.1 --port "$((port+2))" --requirepass "$REDIS_PASSWORD" --save '' \
         --appendonly yes --appendfsync "$fsync" --dir "$1" >>"$work/redis.log" 2>&1 & redis_pid=$!
     for attempt in $(seq 1 120); do

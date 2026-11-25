@@ -55,6 +55,9 @@ type Config struct {
 	KafkaRelayWorkers      int
 	KafkaConsumerWorkers   int
 	SeckillPendingTimeout  time.Duration
+
+	SocialNotificationRedisAddr     string
+	SocialNotificationRedisPassword string
 }
 
 func Load() Config {
@@ -121,7 +124,7 @@ func Load() Config {
 		SocialDetailCache:      socialCache,
 		SocialBoundedFeed:      socialFeed,
 		SocialWriteLimit:       nonNegativeIntEnv("SOCIAL_WRITE_CONCURRENCY", 12),
-		SocialFanoutWorkers:    min(nonNegativeIntEnv("SOCIAL_FANOUT_WORKERS", 2), 8),
+		SocialFanoutWorkers:    min(positiveIntEnv("SOCIAL_FANOUT_WORKERS", 2), 8),
 		MediaUploadLimit:       positiveIntEnv("MEDIA_UPLOAD_CONCURRENCY", 2),
 		TraceEndpoint:          env("TRACE_OTLP_ENDPOINT", ""),
 		TraceSampleRatio:       traceRatio,
@@ -142,6 +145,9 @@ func Load() Config {
 		KafkaRelayWorkers:      positiveIntEnv("KAFKA_RELAY_WORKERS", 4),
 		KafkaConsumerWorkers:   positiveIntEnv("KAFKA_CONSUMER_WORKERS", 3),
 		SeckillPendingTimeout:  durationEnv("SECKILL_PENDING_TIMEOUT", 15*time.Minute),
+
+		SocialNotificationRedisAddr:     env("SOCIAL_NOTIFICATION_REDIS_ADDR", ""),
+		SocialNotificationRedisPassword: env("SOCIAL_NOTIFICATION_REDIS_PASSWORD", ""),
 	}
 }
 

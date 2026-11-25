@@ -21,11 +21,12 @@ import (
 )
 
 type clients struct {
-	mysql          *gorm.DB
-	redis          *redis.Client
-	seckillRedis   *redis.ClusterClient
-	kafka          *kafka.Client
-	kafkaTransport *kafka.Transport
+	mysql             *gorm.DB
+	redis             *redis.Client
+	seckillRedis      *redis.ClusterClient
+	notificationRedis *redis.Client
+	kafka             *kafka.Client
+	kafkaTransport    *kafka.Transport
 }
 
 func openClients(cfg config.Config, withKafka bool) (*clients, error) {
@@ -90,6 +91,10 @@ func openClients(cfg config.Config, withKafka bool) (*clients, error) {
 		})
 	}
 	deps := &clients{mysql: db, redis: redisClient}
+	if cfg.SocialNotificationRedisAddr != "" {
+		deps.notificationRedis = redis.NewClient(&redis.Options{Addr: cfg.SocialNotificationRedisAddr,
+			Password: cfg.SocialNotificationRedisPassword, ContextTimeoutEnabled: true})
+	}
 	if len(cfg.SeckillRedisCluster) > 0 {
 		deps.seckillRedis = redis.NewClusterClient(&redis.ClusterOptions{
 			Addrs: cfg.SeckillRedisCluster, Password: cfg.RedisPassword, ContextTimeoutEnabled: true,
@@ -117,6 +122,9 @@ func (c *clients) close() error {
 	}
 	if c.seckillRedis != nil {
 		err = errors.Join(err, c.seckillRedis.Close())
+	}
+	if c.notificationRedis != nil {
+		err = errors.Join(err, c.notificationRedis.Close())
 	}
 	return errors.Join(err, c.redis.Close())
 }
