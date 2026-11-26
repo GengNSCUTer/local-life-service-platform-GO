@@ -71,7 +71,7 @@ func (s *Service) get(c *gin.Context) {
 		s.respondError(c, "get shop", err)
 		return
 	}
-	s.recordVisit(c)
+	s.recordVisit(c, id)
 	httpx.Respond(c, http.StatusOK, "", item)
 }
 

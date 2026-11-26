@@ -11,7 +11,9 @@
 | `POST /shop` | 管理员创建店铺，返回新 ID |
 | `PUT /shop` | 管理员传 `id` 和需要修改的字段 |
 
-分页默认从第 1 页开始，按 `id` 排序。分类和名称接口也支持 `afterId=0` 从头开始，响应的 `data` 包含 `list` 和可选的 `nextAfterId`。下一页把 `nextAfterId` 填回 `afterId`，并沿用分类或关键词。带坐标的附近查询继续使用 `current`。维护接口先验证登录，再核对 `SHOP_ADMIN_USER_ID`，默认值 `0` 关闭写入权限。更新时省略的字段保持原值，JSON `null` 按省略处理。管理接口可以设置营业时间和均价，评分、销量和评论数由业务数据维护。
+分页默认从第 1 页开始，按 `id` 排序。分类和名称接口也支持 `afterId=0` 从头开始，响应的 `data` 包含 `list` 和可选的 `nextAfterId`。下一页把 `nextAfterId` 填回 `afterId`，并沿用分类或关键词。带坐标的附近查询按距离排序，使用 `current` 每页返回最多 5 家。维护接口先验证登录，再核对 `SHOP_ADMIN_USER_ID`，默认值 `0` 关闭写入权限。更新时省略的字段保持原值，JSON `null` 按省略处理。管理接口可以设置营业时间和均价，评分、销量和评论数由业务数据维护。
+
+附近查询在 Redis 内用 `GEOSEARCH ASC COUNT (current * 5)` 选出最近的前缀。Lua 在同一次执行中确认索引可用，并截取当前页。Go 只收到这一页的 ID 和距离，最多拿 5 个 ID 去 MySQL 查详情，再按距离顺序返回。Redis 仍需计算这一页之前的候选，深页的优化主要节省 Redis 到 Go 的传输和解码。
 
 ## 顺着 Go 源码读
 

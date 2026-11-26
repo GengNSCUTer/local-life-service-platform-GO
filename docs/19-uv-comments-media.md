@@ -2,7 +2,16 @@
 
 ## 每日店铺详情 UV
 
-`GET /shop/:id` 成功时执行一次短超时的 Redis Lua，把用户或浏览器身份加入北京时间当天的 HyperLogLog。`GET /shop/statistics/uv?date=2026-11-24` 用 `SHOP_ADMIN_USER_ID` 配置的账号查询，返回 `date`、`uv` 和 `approximate`。Redis 键从统计日开始保留 30 天。统计只覆盖店铺详情，重复打开不同店铺也只算一个身份。登录和匿名身份分别去重，清除 Cookie、跨浏览器或先匿名后登录会影响口径。
+`GET /shop/:id` 成功时，Go 将当前身份加入北京时间当日的两份 Redis HyperLogLog，一份统计访问任意店铺详情的独立身份，一份只统计当前店铺。两份数据通过一次短超时的 Lua 调用写入，保留 30 天。
+
+| 管理员查询 | 统计口径 |
+| --- | --- |
+| `GET /shop/statistics/uv?date=2026-11-26` | 所有店铺详情的去重 UV |
+| `GET /shop/statistics/uv?date=2026-11-26&shopId=42` | 42 号店铺详情的去重 UV |
+
+查询需要 `SHOP_ADMIN_USER_ID` 对应的账号。响应包含 `date`、`uv`、`approximate`，单店查询也返回 `shopId`。同一个身份访问两家店，在两家的单店统计各计一次，在全站统计合计一次。登录按用户 ID 去重，匿名按浏览器 Cookie 去重，两种身份分别计算。
+
+单店统计从部署新版后开始采集。历史全站 HyperLogLog 只记录当日访问过店铺详情的身份集合，缺少用于拆分的店铺维度。单店查询没有对应统计键时返回 0，适用于尚无访问、升级前的日期和已过保留期的数据。
 
 源码从 `shop.get` 到 `recordVisit`。`user.VisitorLogin` 允许匿名访问，并给有效登录者附上身份。`context.WithTimeout` 限制统计使用的时间。
 

@@ -3,7 +3,10 @@ package shop
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"os"
+	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -60,6 +63,9 @@ func TestGeoIndexReadinessAfterEviction(t *testing.T) {
 	if got, err := geoReady.Run(ctx, cache, keys[:2]).Int(); err != nil || got != 0 {
 		t.Fatalf("evicted index readiness = %d, %v", got, err)
 	}
+	if err := searchGeoPage.Run(ctx, cache, keys[:2], 0, 0, geoRadiusMeters, 0, geoPageSize).Err(); !errors.Is(err, redis.Nil) {
+		t.Fatalf("evicted search returned %v, want redis.Nil", err)
+	}
 	if got, err := claimGeoBuild.Run(ctx, cache, keys, "builder", 5000).Int(); err != nil || got != 1 {
 		t.Fatalf("claim after eviction = %d, %v", got, err)
 	}
@@ -68,5 +74,35 @@ func TestGeoIndexReadinessAfterEviction(t *testing.T) {
 	}
 	if got, err := geoReady.Run(ctx, cache, keys[:2]).Int(); err != nil || got != 1 {
 		t.Fatalf("intentionally empty index readiness = %d, %v", got, err)
+	}
+	if got, err := searchGeoPage.Run(ctx, cache, keys[:2], 0, 0, geoRadiusMeters, 0, geoPageSize).StringSlice(); err != nil || len(got) != 0 {
+		t.Fatalf("empty index search = %v, %v", got, err)
+	}
+
+	points := make([]*redis.GeoLocation, 0, 12)
+	for i := 1; i <= 12; i++ {
+		points = append(points, &redis.GeoLocation{Name: strconv.Itoa(i), Longitude: float64(i) / 1000})
+	}
+	if err := cache.GeoAdd(ctx, key, points...).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.Set(ctx, keys[1], "1", time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		offset int
+		want   []string
+	}{{5, []string{"6", "7", "8", "9", "10"}}, {10, []string{"11", "12"}}, {15, nil}} {
+		page, err := searchGeoPage.Run(ctx, cache, keys[:2], 0, 0, geoRadiusMeters, test.offset, geoPageSize).StringSlice()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for i := 0; i < len(page); i += 2 {
+			ids = append(ids, page[i])
+		}
+		if !slices.Equal(ids, test.want) {
+			t.Fatalf("offset %d: ids = %v, want %v", test.offset, ids, test.want)
+		}
 	}
 }
