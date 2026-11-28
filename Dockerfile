@@ -1,4 +1,6 @@
-FROM golang:1.27.1 AS build
+ARG GO_BUILDER=golang:1.27.1
+FROM ${GO_BUILDER} AS build
+ARG GOPROXY
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

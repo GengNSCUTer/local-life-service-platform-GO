@@ -62,7 +62,7 @@ go vet ./...
 - `Ctrl+C` 或 `SIGTERM` 会让 API 停止接收新连接，给正在处理的请求最多 10 秒完成，然后关闭客户端。
 - `docker compose down` 停止本地中间件并保留数据卷。
 
-本项目通过了 `go test -race ./...` 和 `go vet ./...`。早期阶段使用独立的 MySQL 8.0.33、Redis 7.2.11 和 Kafka 4.1.2 验证了 Kafka 停机恢复、Redis Sentinel 主从切换、10,000 条 Kafka 长积压恢复、死信自动补偿、非法消息审计和优雅停机。以下 Docker 演练使用独立项目，退出时删除该次演练创建的容器和数据卷。当前环境没有 Docker socket 权限，可使用独立进程运行本机回归。
+本项目通过了 `go test -race ./...` 和 `go vet ./...`。独立进程的历史结果见[第一版验收](docs/17-v1-validation.md)，容器部署和故障恢复结果见[本机 Docker 验收](docs/23-docker-verification.md)。以下 Docker 演练使用独立项目，退出时删除该次演练创建的容器和数据卷。
 
 ```bash
 scripts/redis-sentinel-smoke.sh

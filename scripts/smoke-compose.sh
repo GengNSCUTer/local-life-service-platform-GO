@@ -3,23 +3,36 @@ project=${COMPOSE_PROJECT_NAME:-$project-$(date +%s%N)-$$}
 work_dir=$(mktemp -d)
 api_pid=
 compose_started=0
+compose_files=(-f compose.yaml)
+if [[ -n ${SMOKE_COMPOSE_OVERRIDE:-} ]]; then
+    compose_files+=(-f "$SMOKE_COMPOSE_OVERRIDE")
+fi
 
-compose() { docker compose -f compose.yaml -p "$project" "$@"; }
+compose() { docker compose "${compose_files[@]}" -p "$project" "$@"; }
 
 smoke_cleanup() {
+    local status=$?
     trap '' INT TERM
     if [[ -n "$api_pid" ]]; then
         kill -TERM "$api_pid" 2>/dev/null || true
         wait "$api_pid" 2>/dev/null || true
     fi
     if (( compose_started )); then
+        if (( status != 0 )); then
+            # MySQL's startup log can contain its generated root password.
+            compose logs --tail 20 redis redis-replica redis-sentinel-1 kafka >&2 || true
+        fi
         compose unpause kafka >/dev/null 2>&1 || true
         if ! compose down --volumes --remove-orphans; then
             printf 'Compose cleanup failed for %s. Logs are in %s\n' "$project" "$work_dir" >&2
             exit 1
         fi
     fi
+    if (( status != 0 )) && [[ -f "$work_dir/api.log" ]]; then
+        tail -n 40 "$work_dir/api.log" >&2
+    fi
     rm -rf -- "$work_dir"
+    return "$status"
 }
 trap smoke_cleanup EXIT
 trap 'exit 130' INT
