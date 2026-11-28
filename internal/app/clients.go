@@ -98,6 +98,7 @@ func openClients(cfg config.Config, withKafka bool) (*clients, error) {
 	if len(cfg.SeckillRedisCluster) > 0 {
 		deps.seckillRedis = redis.NewClusterClient(&redis.ClusterOptions{
 			Addrs: cfg.SeckillRedisCluster, Password: cfg.RedisPassword, ContextTimeoutEnabled: true,
+			ClusterStateReloadInterval: 3 * time.Second,
 		})
 	}
 	if withKafka {

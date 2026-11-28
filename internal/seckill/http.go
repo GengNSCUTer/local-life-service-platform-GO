@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	mathrand "math/rand/v2"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -71,6 +72,9 @@ func (s *Service) submit(c *gin.Context) {
 	started := time.Now()
 	result, err := s.reserve(ctx, voucherID, userID)
 	if err != nil {
+		if s.shardRedis != nil && isReservationRoutingError(err) {
+			c.Header("Retry-After", "1")
+		}
 		s.observe(started, "redis_reserve", "error")
 		s.unavailable(c, "reserve stock", err)
 		return
@@ -128,14 +132,31 @@ func (s *Service) reserve(ctx context.Context, voucherID, userID uint64) (_ []st
 			return nil, err
 		}
 		key := shard.activity(voucherID)
-		result, err = reserveStock.Run(ctx, s.redisFor(shard),
-			[]string{key, key + ":buyers", orderKey(event.ID), shard.outbox(), shard.timeouts(), reservationBackupKey(event.ID)},
-			strconv.FormatUint(userID, 10), event.ID, payload, s.pendingTimeout.Milliseconds(), s.outboxLimit, s.pendingLimit).StringSlice()
+		keys := []string{key, key + ":buyers", orderKey(event.ID), shard.outbox(), shard.timeouts(), reservationBackupKey(event.ID)}
+		args := []any{strconv.FormatUint(userID, 10), event.ID, payload, s.pendingTimeout.Milliseconds(), s.outboxLimit, s.pendingLimit}
+		client := s.redisFor(shard)
+		result, err = reserveStock.Run(ctx, client, keys, args...).StringSlice()
+		// Retry only cluster replies that reject the script before Lua executes.
+		for delay := 100 * time.Millisecond; shard != 0 && s.shardRedis != nil && isReservationRoutingError(err) && delay <= 400*time.Millisecond; delay *= 2 {
+			if !wait(ctx, delay+mathrand.N(delay/2)) {
+				return nil, ctx.Err()
+			}
+			result, err = reserveStock.Run(ctx, client, keys, args...).StringSlice()
+		}
 		if err != nil || len(result) != 2 || result[0] != "missing" {
 			return result, err
 		}
 	}
 	return result, nil
+}
+
+func isReservationRoutingError(err error) bool {
+	if redis.IsTryAgainError(err) {
+		return true
+	}
+	_, ask := redis.IsAskError(err)
+	_, moved := redis.IsMovedError(err)
+	return ask || moved
 }
 
 func (s *Service) status(c *gin.Context) {
